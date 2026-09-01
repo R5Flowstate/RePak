@@ -2,37 +2,76 @@
 #include "assets.h"
 #include "utils/dxutils.h"
 #include "public/texture.h"
+#include <string>
+#include <vector>
 
 extern bool Texture_AutoAddTexture(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const bool forceDisableStreaming);
+
+static std::vector<uint8_t> HexStringToBytes(const char* hexStr)
+{
+    std::vector<uint8_t> bytes;
+    if (!hexStr || !hexStr[0])
+        return bytes;
+
+    size_t len = strlen(hexStr);
+    bytes.reserve(len / 2);
+
+    for (size_t i = 0; i + 1 < len; i += 2)
+    {
+        char byte[3] = { hexStr[i], hexStr[i + 1], 0 };
+        bytes.push_back(static_cast<uint8_t>(strtoul(byte, nullptr, 16)));
+    }
+    return bytes;
+}
+
+static bool UIImage_OpenFile(CPakFileBuilder* const pak, const char* const assetPath, rapidjson::Document& document)
+{
+    const std::string fileName = pak->GetAssetPath() + assetPath;
+    return JSON_ParseFromFile(fileName.c_str(), "uimg asset", document, true);
+}
 
 // page lump structure and order:
 // - header        HEAD        (align=8)
 // - image offsets CPU_CLIENT  (align=32)
-// - information   CPU_CLIENT  (align=4?16) unknown, dimensions, then hashes, aligned to 16 if we have unknown (which needs to be reserved still).
+// - information   CPU_CLIENT  (align=4?16)
 // - uv data       TEMP_CLIENT (align=4)
 void Assets::AddUIImageAsset_v10(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry)
 {
-    // get the info for the ui atlas image
+    // Check if assetPath is a JSON file with hex format
+    const std::string pathStr(assetPath);
+    if (pathStr.size() > 5 && pathStr.substr(pathStr.size() - 5) == ".json")
+    {
+        rapidjson::Document document;
+        if (UIImage_OpenFile(pak, assetPath, document))
+        {
+            if (document.HasMember("cpuDataHex"))
+            {
+                AddUIImageAsset_v10_FromHex(pak, assetGuid, assetPath, document);
+                return;
+            }
+        }
+    }
+
     const char* const atlasPath = JSON_GetValueRequired<const char*>(mapEntry, "atlas");
     const PakGuid_t atlasGuid = RTech::StringToGuid(atlasPath);
 
-    const bool textureAdded = Texture_AutoAddTexture(pak, atlasGuid, atlasPath, true);
+    // note: we error here as we can't check if it was added as a streamed texture, and uimg doesn't support texture streaming.
+    if (!Texture_AutoAddTexture(pak, atlasGuid, atlasPath, true/*streaming disabled as uimg can not be streamed*/))
+        Error("Atlas texture \"%s\" with GUID 0x%llX was already added as Texture asset; it can only be added through an UI image atlas asset.\n", atlasPath, atlasGuid);
 
-    const PakAsset_t* const atlasAsset = pak->GetAssetByGuid(atlasGuid, nullptr, true);
+    PakAsset_t& asset = pak->BeginAsset(assetGuid, assetPath);
+    PakAsset_t* const atlasAsset = pak->GetAssetByGuid(atlasGuid, nullptr);
 
-    if(!textureAdded && atlasAsset && atlasAsset->HasAnyStreamedData())
-        Error("UI Atlas texture \"%s\" with GUID 0x%llX was already added as a texture with streaming data. UI Image atlases do not support streaming.\n", atlasPath, atlasGuid);
-
+    // this really shouldn't be triggered, since the texture is either automatically added above, or a fatal error is thrown
+    // there is no code path in AddTextureAsset in which the texture does not exist after the call and still continues execution
     if (!atlasAsset) [[ unlikely ]]
     {
         assert(0);
         Error("Internal failure while adding atlas texture \"%s\" with GUID 0x%llX.\n", atlasPath, assetGuid);
     }
 
-    // Make sure the atlas asset is actually a texture
+    // make sure referenced asset is a texture for sanity
     atlasAsset->EnsureType(TYPE_TXTR);
-
-    PakAsset_t& asset = pak->BeginAsset(assetGuid, assetPath);
 
     rapidjson::Value::ConstMemberIterator imagesIt;
     JSON_GetRequired(mapEntry, "images", JSONFieldType_e::kArray, imagesIt);
@@ -42,6 +81,12 @@ void Assets::AddUIImageAsset_v10(CPakFileBuilder* const pak, const PakGuid_t ass
 
     if (imageArraySize > MAX_UI_ATLAS_IMAGES)
         Error("UI image atlas contains too many images (max %zu, got %zu).\n", (size_t)MAX_UI_ATLAS_IMAGES, imageArraySize);
+
+    // needs to be reversed still, not all uimg's use this! this might be
+    // necessary to reverse at some point since some uimg's (especially in
+    // world rui's) seem to flicker or glitch at certain view angles and the
+    // only data we currently do not set is this.
+    const uint16_t unkCount = (uint16_t)JSON_GetValueOrDefault(mapEntry, "unkCount", 0);
 
     PakPageLump_s hdrLump = pak->CreatePageLump(sizeof(UIImageAtlasHeader_t), SF_HEAD | SF_CLIENT, 8);
 
@@ -77,21 +122,66 @@ void Assets::AddUIImageAsset_v10(CPakFileBuilder* const pak, const PakGuid_t ass
 
     ////////////////////
     // IMAGE OFFSETS
+    // Helper to parse float, detecting string "-0" for negative zero
+    auto ParseFloatNegZero = [](const rapidjson::Value& obj, const char* name, float defaultVal) -> float
+    {
+        rapidjson::Value::ConstMemberIterator mit = obj.FindMember(name);
+        if (mit == obj.MemberEnd())
+            return defaultVal;
+
+        // Check for string literal "-0" (negative zero)
+        if (mit->value.IsString())
+        {
+            const char* str = mit->value.GetString();
+            if (strcmp(str, "-0") == 0)
+            {
+                // Return -0.0f with sign bit set
+                uint32_t negZeroBits = 0x80000000u;
+                float result;
+                std::memcpy(&result, &negZeroBits, sizeof(result));
+                return result;
+            }
+            // Try parsing as float
+            char* end = nullptr;
+            float f = std::strtof(str, &end);
+            return f;
+        }
+
+        if (!mit->value.IsNumber())
+            return defaultVal;
+
+        if (mit->value.IsDouble() || mit->value.IsLosslessDouble())
+            return static_cast<float>(mit->value.GetDouble());
+        if (mit->value.IsFloat() || mit->value.IsLosslessFloat())
+            return mit->value.GetFloat();
+        if (mit->value.IsInt())
+            return static_cast<float>(mit->value.GetInt());
+        if (mit->value.IsInt64())
+            return static_cast<float>(mit->value.GetInt64());
+        if (mit->value.IsUint())
+            return static_cast<float>(mit->value.GetUint());
+        if (mit->value.IsUint64())
+            return static_cast<float>(mit->value.GetUint64());
+
+        return defaultVal;
+    };
+
     for (const rapidjson::Value& it : imageArray)
     {
         UIImageOffset uiio;
-        uiio.cropInsetLeft = JSON_GetValueOrDefault(it, "cropInsetLeft", 0.0f);
-        uiio.cropInsetTop = JSON_GetValueOrDefault(it, "cropInsetTop", 0.0f);
 
-        uiio.endAnchorX = JSON_GetValueOrDefault(it, "endAnchorX", 1.0f);
-        uiio.endAnchorY = JSON_GetValueOrDefault(it, "endAnchorY", 1.0f);
+        uiio.cropInsetLeft = ParseFloatNegZero(it, "cropInsetLeft", 0.0f);
+        uiio.cropInsetTop = ParseFloatNegZero(it, "cropInsetTop", 0.0f);
 
-        uiio.startAnchorX = JSON_GetValueOrDefault(it, "startAnchorX", 0.0f);
-        uiio.startAnchorY = JSON_GetValueOrDefault(it, "startAnchorY", 0.0f);
+        uiio.endAnchorX = ParseFloatNegZero(it, "endAnchorX", 1.0f);
+        uiio.endAnchorY = ParseFloatNegZero(it, "endAnchorY", 1.0f);
+
+        uiio.startAnchorX = ParseFloatNegZero(it, "startAnchorX", 0.0f);
+        uiio.startAnchorY = ParseFloatNegZero(it, "startAnchorY", 0.0f);
 
         // Lower means more zoomed in.
-        uiio.scaleRatioX = JSON_GetValueOrDefault(it, "scaleRatioX", 1.0f);
-        uiio.scaleRatioY = JSON_GetValueOrDefault(it, "scaleRatioY", 1.0f);
+        uiio.scaleRatioX = ParseFloatNegZero(it, "scaleRatioX", 1.0f);
+        uiio.scaleRatioY = ParseFloatNegZero(it, "scaleRatioY", 1.0f);
 
         // [amos]: tools like TexturePacker can automatically create entire ui image atlases.
         // TexturePacker can also trim out transparent area's (exactly like how the original
@@ -174,6 +264,41 @@ void Assets::AddUIImageAsset_v10(CPakFileBuilder* const pak, const PakGuid_t ass
         ofBuf.write(uiio);
     }
 
+    ////////////////////
+    // UNK ARRAY
+    PakPageLump_s unkLump{};
+    if (unkCount > 0)
+    {
+        rapidjson::Value::ConstMemberIterator unkIt;
+        if (!JSON_GetRequired(mapEntry, "unk", JSONFieldType_e::kArray, unkIt))
+            Error("unkCount is %u but \"unk\" array not found in JSON.\n", unkCount);
+
+        const rapidjson::Value::ConstArray& unkArray = unkIt->value.GetArray();
+        if (unkArray.Size() != unkCount)
+            Error("unkCount is %u but \"unk\" array has %zu elements.\n", unkCount, unkArray.Size());
+
+        const size_t unkDataSize = sizeof(UIImageOffset) * unkCount;
+        unkLump = pak->CreatePageLump(unkDataSize, SF_CPU | SF_CLIENT, 16);
+        rmem unkBuf(unkLump.data);
+
+        for (const rapidjson::Value& it : unkArray)
+        {
+            UIImageOffset uiio;
+            uiio.cropInsetLeft = ParseFloatNegZero(it, "cropInsetLeft", 0.0f);
+            uiio.cropInsetTop = ParseFloatNegZero(it, "cropInsetTop", 0.0f);
+            uiio.endAnchorX = ParseFloatNegZero(it, "endAnchorX", 1.0f);
+            uiio.endAnchorY = ParseFloatNegZero(it, "endAnchorY", 1.0f);
+            uiio.startAnchorX = ParseFloatNegZero(it, "startAnchorX", 0.0f);
+            uiio.startAnchorY = ParseFloatNegZero(it, "startAnchorY", 0.0f);
+            uiio.scaleRatioX = ParseFloatNegZero(it, "scaleRatioX", 1.0f);
+            uiio.scaleRatioY = ParseFloatNegZero(it, "scaleRatioY", 1.0f);
+            unkBuf.write(uiio);
+        }
+
+        // set unk page index and offset
+        pak->AddPointer(hdrLump, offsetof(UIImageAtlasHeader_t, unknown), unkLump, 0);
+    }
+
     const size_t imageDimensionsDataSize = sizeof(uint16_t) * 2 * imageArraySize;
     const size_t imageHashesDataSize = (sizeof(uint32_t) + sizeof(uint32_t)) * imageArraySize;
 
@@ -190,8 +315,10 @@ void Assets::AddUIImageAsset_v10(CPakFileBuilder* const pak, const PakGuid_t ass
 
     for (const rapidjson::Value& it : imageArray)
     {
-        const uint16_t width = (uint16_t)JSON_GetNumberRequired<int>(it, "width");
-        const uint16_t height = (uint16_t)JSON_GetNumberRequired<int>(it, "height");
+        // renderWidth/renderHeight allow specifying different render dimensions than the slice size
+        // if not specified, falls back to width/height
+        const uint16_t width = (uint16_t)JSON_GetValueOrDefault(it, "renderWidth", JSON_GetNumberRequired<int>(it, "width"));
+        const uint16_t height = (uint16_t)JSON_GetValueOrDefault(it, "renderHeight", JSON_GetNumberRequired<int>(it, "height"));
 
         ifBuf.write<uint16_t>(width);
         ifBuf.write<uint16_t>(height);
@@ -256,11 +383,8 @@ void Assets::AddUIImageAsset_v10(CPakFileBuilder* const pak, const PakGuid_t ass
             const size_t pathBufSize = pathLen + 1; // +1 for null terminator.
             memcpy(&devLump.data[nextStringTableOffset], imagePath, pathBufSize);
 
-            ifBuf.write(nextStringTableOffset << 16);
+            ifBuf.write(nextStringTableOffset);
             nextStringTableOffset += (uint32_t)pathBufSize;
-
-            if (nextStringTableOffset >= UINT16_MAX)
-                Error("Failed to add UIMG asset \"%s\": Image debug names buffer exceeded the 16-bit limit (image names were too long, or too many images in one atlas)\n", assetPath);
         }
         else
         {
@@ -294,6 +418,199 @@ void Assets::AddUIImageAsset_v10(CPakFileBuilder* const pak, const PakGuid_t ass
     }
 
     asset.InitAsset(hdrLump.GetPointer(), sizeof(UIImageAtlasHeader_t), uvLump.GetPointer(), UIMG_VERSION, AssetType::UIMG);
+    asset.SetHeaderPointer(hdrLump.data);
+
+    pak->FinishAsset();
+}
+
+// Hex-based reconstruction for 1:1 UIMG from exported JSON
+void Assets::AddUIImageAsset_v10_FromHex(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry)
+{
+    PakGuid_t atlasGuid = 0;
+    rapidjson::Value::ConstMemberIterator atlasIt;
+
+    if (JSON_GetIterator(mapEntry, "atlas", JSONFieldType_e::kString, atlasIt))
+    {
+        const char* const atlasPath = atlasIt->value.GetString();
+        atlasGuid = RTech::StringToGuid(atlasPath);
+
+        if (!Texture_AutoAddTexture(pak, atlasGuid, atlasPath, true))
+            Error("Atlas texture \"%s\" with GUID 0x%llX was already added.\n", atlasPath, atlasGuid);
+    }
+    else if (JSON_GetIterator(mapEntry, "atlasGUID", JSONFieldType_e::kString, atlasIt))
+    {
+        const char* guidStr = atlasIt->value.GetString();
+        if (guidStr[0] == '0' && (guidStr[1] == 'x' || guidStr[1] == 'X'))
+            atlasGuid = strtoull(guidStr + 2, nullptr, 16);
+        else
+            atlasGuid = strtoull(guidStr, nullptr, 16);
+
+        Log("Using atlas GUID reference: 0x%llX (texture must be added separately)\n", atlasGuid);
+    }
+    else
+    {
+        Error("UIMG asset requires either 'atlas' path or 'atlasGUID'.\n");
+    }
+
+    PakAsset_t& asset = pak->BeginAsset(assetGuid, assetPath);
+
+    const int width = JSON_GetNumberOrDefault(mapEntry, "width", 0);
+    const int height = JSON_GetNumberOrDefault(mapEntry, "height", 0);
+    const float widthRatio = JSON_GetNumberOrDefault(mapEntry, "widthRatio", width > 0 ? 1.0f / width : 0.0f);
+    const float heightRatio = JSON_GetNumberOrDefault(mapEntry, "heightRatio", height > 0 ? 1.0f / height : 0.0f);
+    const int textureCount = JSON_GetNumberOrDefault(mapEntry, "textureCount", 0);
+    const int unkCount = JSON_GetNumberOrDefault(mapEntry, "unkCount", 0);
+
+    if (textureCount == 0)
+        Error("UIMG asset has textureCount = 0.\n");
+
+    std::string cpuDataHex, offsetsHex, dimensionsHex, hashTableHex, namesHex, unkHex;
+    JSON_GetValue(mapEntry, "cpuDataHex", cpuDataHex);
+    JSON_GetValue(mapEntry, "offsetsHex", offsetsHex);
+    JSON_GetValue(mapEntry, "dimensionsHex", dimensionsHex);
+    JSON_GetValue(mapEntry, "hashTableHex", hashTableHex);
+    JSON_GetValue(mapEntry, "namesHex", namesHex);
+    JSON_GetValue(mapEntry, "unkHex", unkHex);
+
+    std::vector<uint8_t> cpuData = HexStringToBytes(cpuDataHex.c_str());
+    std::vector<uint8_t> offsetsData = HexStringToBytes(offsetsHex.c_str());
+    std::vector<uint8_t> dimensionsData = HexStringToBytes(dimensionsHex.c_str());
+    std::vector<uint8_t> hashTableData = HexStringToBytes(hashTableHex.c_str());
+    std::vector<uint8_t> namesData = HexStringToBytes(namesHex.c_str());
+    std::vector<uint8_t> unkData = HexStringToBytes(unkHex.c_str());
+
+    const size_t expectedCpuSize = textureCount * sizeof(UIImageUV);
+    const size_t expectedOffsetsSize = textureCount * sizeof(UIImageOffset);
+    const size_t expectedDimensionsSize = textureCount * 4;
+    const size_t expectedHashSize = textureCount * 8;
+    const size_t expectedUnkSize = unkCount * 32;
+
+    if (cpuData.size() != expectedCpuSize)
+        Warning("cpuDataHex size mismatch: expected %zu, got %zu\n", expectedCpuSize, cpuData.size());
+    if (offsetsData.size() != expectedOffsetsSize)
+        Warning("offsetsHex size mismatch: expected %zu, got %zu\n", expectedOffsetsSize, offsetsData.size());
+    if (dimensionsData.size() != expectedDimensionsSize)
+        Warning("dimensionsHex size mismatch: expected %zu, got %zu\n", expectedDimensionsSize, dimensionsData.size());
+    if (hashTableData.size() != expectedHashSize)
+        Warning("hashTableHex size mismatch: expected %zu, got %zu\n", expectedHashSize, hashTableData.size());
+    if (unkCount > 0 && unkData.size() != expectedUnkSize)
+        Warning("unkHex size mismatch: expected %zu, got %zu\n", expectedUnkSize, unkData.size());
+
+    PakPageLump_s hdrLump = pak->CreatePageLump(sizeof(UIImageAtlasHeader_t), SF_HEAD | SF_CLIENT, 8);
+    UIImageAtlasHeader_t* const pHdr = reinterpret_cast<UIImageAtlasHeader_t*>(hdrLump.data);
+
+    pHdr->width = static_cast<uint16_t>(width);
+    pHdr->height = static_cast<uint16_t>(height);
+    pHdr->widthRatio = widthRatio;
+    pHdr->heightRatio = heightRatio;
+    pHdr->imageCount = static_cast<uint16_t>(textureCount);
+    pHdr->unkCount = static_cast<uint16_t>(unkCount);
+    pHdr->atlasGUID = atlasGuid;
+
+    Pak_RegisterGuidRefAtOffset(atlasGuid, offsetof(UIImageAtlasHeader_t, atlasGUID), hdrLump, asset);
+
+    PakPageLump_s offsetLump = pak->CreatePageLump(offsetsData.size(), SF_CPU | SF_CLIENT, 32);
+    memcpy(offsetLump.data, offsetsData.data(), offsetsData.size());
+    pak->AddPointer(hdrLump, offsetof(UIImageAtlasHeader_t, pImageOffsets), offsetLump, 0);
+
+    size_t infoLumpSize = dimensionsData.size() + hashTableData.size();
+    size_t unkOffset = 0;
+    size_t hashOffset = dimensionsData.size();
+
+    if (unkCount > 0 && !unkData.empty())
+    {
+        infoLumpSize += unkData.size();
+        unkOffset = dimensionsData.size();
+        hashOffset = dimensionsData.size() + unkData.size();
+    }
+
+    PakPageLump_s infoLump = pak->CreatePageLump(infoLumpSize, SF_CPU | SF_CLIENT, unkCount > 0 ? 16 : 4);
+
+    memcpy(infoLump.data, dimensionsData.data(), dimensionsData.size());
+    pak->AddPointer(hdrLump, offsetof(UIImageAtlasHeader_t, pImageDimensions), infoLump, 0);
+
+    if (unkCount > 0 && !unkData.empty())
+    {
+        memcpy(infoLump.data + unkOffset, unkData.data(), unkData.size());
+        pak->AddPointer(hdrLump, offsetof(UIImageAtlasHeader_t, unknown), infoLump, unkOffset);
+    }
+
+    memcpy(infoLump.data + hashOffset, hashTableData.data(), hashTableData.size());
+    pak->AddPointer(hdrLump, offsetof(UIImageAtlasHeader_t, pImageHashes), infoLump, hashOffset);
+
+    if (!namesData.empty() && pak->IsFlagSet(PF_KEEP_DEV))
+    {
+        PakPageLump_s namesLump = pak->CreatePageLump(namesData.size(), SF_CPU | SF_DEV, 1);
+        memcpy(namesLump.data, namesData.data(), namesData.size());
+        pak->AddPointer(hdrLump, offsetof(UIImageAtlasHeader_t, pImagesNames), namesLump, 0);
+    }
+
+    PakPageLump_s uvLump = pak->CreatePageLump(cpuData.size(), SF_CPU | SF_TEMP | SF_CLIENT, 4);
+    memcpy(uvLump.data, cpuData.data(), cpuData.size());
+
+    asset.InitAsset(hdrLump.GetPointer(), sizeof(UIImageAtlasHeader_t), uvLump.GetPointer(), UIMG_VERSION, AssetType::UIMG);
+    asset.SetHeaderPointer(hdrLump.data);
+
+    pak->FinishAsset();
+
+    Log("Added UIMG (hex): %s (%dx%d, %d images)\n", assetPath, width, height, textureCount);
+}
+
+// uiia v2: 64-byte header + rawData. Self-pointers in the blob must be relocated or the load handler AVs.
+void Assets::AddUIImageAtlasAsset_v2(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry)
+{
+    UNUSED(mapEntry);
+
+    BinaryIO bio;
+    const std::string filePath = pak->GetAssetPath() + assetPath;
+
+    if (!bio.Open(filePath, BinaryIO::Mode_e::Read))
+        Error("Failed to open uiia asset \"%s\".\n", assetPath);
+
+    const size_t fileSize = bio.GetSize();
+    if (fileSize < 8)
+        Error("uiia file \"%s\" is too small (%zu bytes).\n", assetPath, fileSize);
+
+    uint32_t fileMagic = 0, nReloc = 0;
+    bio.Read(fileMagic);
+    bio.Read(nReloc);
+    if (fileMagic != UIIA_FILE_MAGIC)
+        Error("uiia file \"%s\" has bad magic (expected %x, got %x).\n", assetPath, UIIA_FILE_MAGIC, fileMagic);
+
+    std::vector<uint32_t> relocOffs(nReloc);
+    for (uint32_t i = 0; i < nReloc; i++)
+        bio.Read(relocOffs[i]);
+
+    const size_t containerHdr = 8 + (static_cast<size_t>(nReloc) * sizeof(uint32_t));
+    if (fileSize < containerHdr + UIIA_V2_HEADER_SIZE)
+        Error("uiia file \"%s\" is truncated.\n", assetPath);
+
+    const size_t rawDataSize = fileSize - containerHdr - UIIA_V2_HEADER_SIZE;
+
+    PakAsset_t& asset = pak->BeginAsset(assetGuid, assetPath);
+
+    PakPageLump_s hdrLump = pak->CreatePageLump(UIIA_V2_HEADER_SIZE, SF_HEAD | SF_CLIENT, 16);
+    bio.Read(reinterpret_cast<uint8_t*>(hdrLump.data), UIIA_V2_HEADER_SIZE);
+
+    PagePtr_t rawDataPtr = PagePtr_t::NullPtr();
+    if (rawDataSize > 0)
+    {
+        PakPageLump_s rawLump = pak->CreatePageLump(rawDataSize, SF_CPU | SF_CLIENT, 16);
+        bio.Read(reinterpret_cast<uint8_t*>(rawLump.data), rawDataSize);
+        rawDataPtr = rawLump.GetPointer();
+
+        for (const uint32_t off : relocOffs)
+        {
+            if (static_cast<size_t>(off) + sizeof(PagePtr_t) > rawDataSize)
+                Error("uiia \"%s\" reloc offset %u out of range.\n", assetPath, off);
+
+            const uint32_t targetOff = *reinterpret_cast<const uint32_t*>(&rawLump.data[off + 4]);
+            pak->AddPointer(rawLump, off, rawLump, targetOff);
+        }
+    }
+    bio.Close();
+
+    asset.InitAsset(hdrLump.GetPointer(), UIIA_V2_HEADER_SIZE, rawDataPtr, UIIA_VERSION_V2, AssetType::UIIA);
     asset.SetHeaderPointer(hdrLump.data);
 
     pak->FinishAsset();

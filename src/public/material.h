@@ -16,9 +16,10 @@ enum MaterialShaderType_e : uint8_t
 	WLDC = 0x7,
 	PTCU = 0x8,
 	PTCS = 0x9,
+	RGBS = 0xA,
 
 	// not real types
-	_TYPE_COUNT = 0xA,
+	_TYPE_COUNT = 0xB,
 	_TYPE_LEGACY = 0xFE, // r2 types
 	_TYPE_INVALID = 0xFF,
 };
@@ -34,6 +35,7 @@ static const char* s_materialShaderTypeNames[] = {
 	"wldc",
 	"ptcu",
 	"ptcs",
+	"rgbs",
 };
 
 inline MaterialShaderType_e Material_ShaderTypeFromString(const std::string& str, const unsigned int assetVersion)
@@ -55,6 +57,7 @@ inline MaterialShaderType_e Material_ShaderTypeFromString(const std::string& str
 		case 'udgr': return RGDU; // rgdu
 		case 'pdgr': return RGDP; // rgdp
 		case 'cdgr': return RGDC; // rgdc
+		case 'sbgr': return RGBS; // rgbs
 
 			// non-static models
 		case 'unks': return SKNU; // sknu
@@ -153,6 +156,10 @@ struct __declspec(align(16)) MaterialDXState_v15_t
 
 	// flags to determine how the D3D11_RASTERIZER_DESC is defined
 	uint16_t rasterizerFlags;
+
+	// padding in S3 v15; carries real data in S21 v23 materials (material offset 0xB8-0xBF).
+	// Kept byte-1:1 from the RSX export; size unchanged (was implicit align(16) padding).
+	char unk_28[8];
 };
 
 static_assert(sizeof(MaterialDXState_v15_t) == 0x30);
@@ -547,6 +554,56 @@ struct __declspec(align(16)) MaterialAssetHeader_v15_t
 };
 static_assert(sizeof(MaterialAssetHeader_v15_t) == 256);
 
+// S21-native material header (matl v23). Same 256B v15-FAMILY size, but the 0x90-0xFF region
+// DIFFERS from S3 v15: v23 has ONE dxState (0x90-0xBF) followed by a params block, where v15 had
+// dxStates[2] (0x90-0xEF). Mapped from the shipping mp_rr_district across 5197 materials: materialType
+// moved 0xF2 -> 0xCA (0xCA holds the real MaterialShaderType_e; 0xF2 is always 0), textureAnimation
+// 0xF8 -> 0xD0, plus a float param @0xE8 (1.0 default). Writing the v15 layout for a v23 material
+// put materialType=0 (RGDU) -> wrong shader -> render AV 0x4E5DEB, and textureAnimation@0xF8 ->
+// guidDesc mismatch. The 0x00-0x8F region is identical to v15.
+struct __declspec(align(16)) MaterialAssetHeader_v23_t
+{
+	uint64_t vftableReserved;
+	char gap_8[0x8];
+	PakGuid_t guid;
+
+	PagePtr_t materialName;
+	PagePtr_t surfaceProp;
+	PagePtr_t surfaceProp2;
+
+	PakGuid_t passMaterials[RENDER_PASS_MAT_COUNT];
+	PakGuid_t shaderSet;
+
+	PagePtr_t textureHandles;
+	PagePtr_t streamingTextureHandles;
+
+	short numStreamingTextureHandles;
+	short width;
+	short height;
+	short depth;
+
+	char samplers[8];
+	uint32_t features;
+	uint32_t unk_84;
+	uint32_t flags;
+	uint32_t flags2;
+
+	MaterialDXState_v15_t dxState;     // 0x90 -- v23 has ONE dxState (v15 had [2])
+
+	float    unk_C0;                   // 0xC0 (param, 0 default)
+	float    unk_C4;                   // 0xC4 (param, 0 default)
+	uint16_t numAnimationFrames;       // 0xC8
+	MaterialShaderType_e materialType; // 0xCA
+	uint8_t  uberBufferFlags;          // 0xCB
+	uint32_t unk_CC;                   // 0xCC
+	PakGuid_t textureAnimation;        // 0xD0 (v15 had it at 0xF8)
+	char     pad_D8[0x10];             // 0xD8
+	float    unk_E8;                   // 0xE8 (1.0 default)
+	float    unk_EC;                   // 0xEC (param, 0 default)
+	char     pad_F0[0x10];             // 0xF0
+};
+static_assert(sizeof(MaterialAssetHeader_v23_t) == 256);
+
 #pragma pack(push, 1)
 
 struct MaterialAsset_t
@@ -576,6 +633,15 @@ struct MaterialAsset_t
 
 	MaterialShaderType_e materialType;
 	uint8_t uberBufferFlags;
+
+	// v23 byte-1:1 params (raw bits from the RSX json). 0 for non-v23 materials. dxState @0x28
+	// lives in dxStates[0].unk_28 (set in FromJSON). See MaterialAssetHeader_v23_t.
+	uint64_t v23_unk_C0 = 0; // material 0xC0-0xC7 (unk_C0 + unk_C4)
+	uint32_t v23_unk_CC = 0; // material 0xCC
+	uint32_t v23_unk_E8 = 0; // material 0xE8 (float bits)
+	uint32_t v23_unk_EC = 0; // material 0xEC
+	uint32_t v23_unk_84 = 0; // material 0x84 (mask; hi-short==1 on screen/emissive mats)
+	uint32_t v23_unk_F0 = 0; // material 0xF0 (first dword; 4 on some decals)
 
 	std::string materialTypeStr;
 
@@ -630,7 +696,57 @@ struct MaterialAsset_t
 				matl->dxStates[i].rasterizerFlags = this->dxStates[i].rasterizerFlags;
 			}
 		}
-		else if (assetVersion == 15) // version 15 - season 3 apex
+		else if (assetVersion >= 23) // S21 v23: 256B v15-family header, but 0x90-0xFF params layout differs (see MaterialAssetHeader_v23_t)
+		{
+			MaterialAssetHeader_v23_t* matl = reinterpret_cast<MaterialAssetHeader_v23_t*>(buf);
+
+			matl->guid = this->guid;
+
+			matl->passMaterials[DEPTH_SHADOW] = this->passMaterials[DEPTH_SHADOW];
+			matl->passMaterials[DEPTH_PREPASS] = this->passMaterials[DEPTH_PREPASS];
+			matl->passMaterials[DEPTH_VSM] = this->passMaterials[DEPTH_VSM];
+			matl->passMaterials[DEPTH_SHADOW_TIGHT] = this->passMaterials[DEPTH_SHADOW_TIGHT];
+			matl->passMaterials[COL_PASS] = this->passMaterials[COL_PASS];
+
+			matl->shaderSet = this->shaderSet;
+
+			matl->width = this->width;
+			matl->height = this->height;
+			matl->depth = this->depth;
+
+			matl->features = this->features;
+
+			memcpy(matl->samplers, this->samplers, sizeof(matl->samplers));
+			matl->flags = this->flags;
+			matl->flags2 = this->flags2;
+
+			matl->materialType = this->materialType;
+			matl->uberBufferFlags = this->uberBufferFlags;
+
+			matl->textureAnimation = this->textureAnimation;
+			matl->numAnimationFrames = this->numAnimationFrames;
+
+			// v23 has a SINGLE dxState (from dxStates[0]); v15's dxStates[1] region (0xC0-0xEF) is
+			// repurposed as the params block (materialType@0xCA / textureAnimation@0xD0 / floats).
+			for (int targetIdx = 0; targetIdx < 8; targetIdx++)
+				matl->dxState.blendStates[targetIdx] = this->dxStates[0].blendStates[targetIdx];
+
+			matl->dxState.blendStateMask = this->dxStates[0].blendStateMask;
+			matl->dxState.depthStencilFlags = this->dxStates[0].depthStencilFlags;
+			matl->dxState.rasterizerFlags = this->dxStates[0].rasterizerFlags;
+
+			// byte-1:1 v23 params (raw bits from the RSX json). dxState @0x28 (material 0xB8-0xBF),
+			// then 0xC0-0xC7, 0xCC, 0xE8 (float), 0xEC. Previously these were 0/hardcoded -> wrong
+			// shader param block -> NULL shader binding -> render AV 0x4E5DEB.
+			memcpy(matl->dxState.unk_28, this->dxStates[0].unk_28, sizeof(matl->dxState.unk_28));
+			memcpy(&matl->unk_C0, &this->v23_unk_C0, sizeof(this->v23_unk_C0)); // unk_C0 + unk_C4
+			matl->unk_CC = this->v23_unk_CC;
+			memcpy(&matl->unk_E8, &this->v23_unk_E8, sizeof(matl->unk_E8));      // float bits
+			memcpy(&matl->unk_EC, &this->v23_unk_EC, sizeof(matl->unk_EC));      // 0xEC bits
+			matl->unk_84 = this->v23_unk_84;                                     // 0x84 mask
+			memcpy(matl->pad_F0, &this->v23_unk_F0, sizeof(this->v23_unk_F0));   // 0xF0 first dword
+		}
+		else if (assetVersion >= 15) // v15 (S3 apex)
 		{
 			MaterialAssetHeader_v15_t* matl = reinterpret_cast<MaterialAssetHeader_v15_t*>(buf);
 

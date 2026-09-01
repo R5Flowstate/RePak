@@ -423,6 +423,270 @@ static void Texture_InternalAddTexture(CPakFileBuilder* const pak, const PakGuid
     pak->FinishAsset();
 }
 
+bool Texture_AutoAddTexture(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const bool forceDisableStreaming); // defined after v10 writer
+
+void Assets::AddTextureAsset_v8(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry)
+{
+    const bool disableStreaming = JSON_GetValueOrDefault(mapEntry, "$disableStreaming", false);
+    Texture_InternalAddTexture(pak, assetGuid, assetPath, disableStreaming);
+}
+
+//=============================================================================
+// txtr v10. Permanent mips in the rpak; streamed mips in our starpak (or reused).
+// $hdrTail copies [0x14..0x37] from the source pak -- dataSize is stream-dependent.
+//=============================================================================
+#define TXTR_V10_TAIL_OFF  0x14
+#define TXTR_V10_TAIL_SIZE (0x38 - TXTR_V10_TAIL_OFF) // 0x24 (36)
+
+struct TextureV10Meta_s
+{
+    uint8_t  strmMips = 0;          // mandatory-streamed mip count (referenced, not packed)
+    uint8_t  optMips = 0;           // optional-streamed mip count (referenced, not packed)
+    uint8_t  layerCount = 0;        // +0x11 (cubemap if & 2); RSX drops it from the DDS, source-pak byte
+    bool     hasTail = false;
+    uint8_t  hdrTail[TXTR_V10_TAIL_SIZE] = {}; // header bytes 0x14..0x37 copied from source pak
+    int64_t  starpakOff = -1;       // offset into the mandatory starpak (pc_all_sdk.starpak)
+    int64_t  optStarpakOff = -1;    // offset into the optional starpak (pc_all_sdk.opt.starpak)
+};
+
+static void Texture_InternalAddTexture_v10(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const TextureV10Meta_s& meta)
+{
+    PakAsset_t& asset = pak->BeginAsset(assetGuid, assetPath);
+
+    const std::string textureFilePath = Utils::ChangeExtension(pak->GetAssetPath() + assetPath, ".dds");
+    BinaryIO input;
+
+    if (!input.Open(textureFilePath, BinaryIO::Mode_e::Read))
+        Error("Failed to open texture asset \"%s\".\n", textureFilePath.c_str());
+
+    PakPageLump_s hdrChunk = pak->CreatePageLump(sizeof(TextureAssetHeader_v10_t), SF_HEAD, 8);
+    TextureAssetHeader_v10_t* const hdr = reinterpret_cast<TextureAssetHeader_v10_t*>(hdrChunk.data);
+
+    int magic;
+    input.Read(magic);
+
+    if (magic != DDS_MAGIC)
+        Error("Attempted to add a texture asset that was not a valid DDS file (invalid magic).\n");
+
+    DDS_HEADER ddsh;
+    input.Read(ddsh);
+
+    if (ddsh.dwMipMapCount > MAX_MIPS_PER_TEXTURE)
+        Error("Attempted to add a texture asset with too many mipmaps (max %u, got %u).\n", MAX_MIPS_PER_TEXTURE, ddsh.dwMipMapCount);
+
+    DXGI_FORMAT dxgiFormat = DXGI_FORMAT_UNKNOWN;
+    uint8_t arraySize = 1;
+    bool isDX10 = false;
+
+    if (ddsh.ddspf.dwFourCC == '01XD')
+    {
+        DDS_HEADER_DXT10 ddsh_dx10;
+        input.Read(ddsh_dx10);
+
+        dxgiFormat = ddsh_dx10.dxgiFormat;
+        arraySize = static_cast<uint8_t>(ddsh_dx10.arraySize);
+        isDX10 = true;
+    }
+    else
+    {
+        dxgiFormat = DXUtils::GetFormatFromHeader(ddsh);
+
+        if (dxgiFormat == DXGI_FORMAT_UNKNOWN)
+            Error("Attempted to add a texture asset from which the format type couldn't be classified.\n");
+    }
+
+    const uint16_t imageFormat = Texture_DXGIToImageFormat(dxgiFormat);
+
+    if (imageFormat == TEXTURE_INVALID_FORMAT_INDEX)
+        Error("Attempted to add a texture asset using an unsupported format \"%s\".\n", DXUtils::GetFormatAsString(dxgiFormat));
+
+    hdr->imgFormat = imageFormat;
+    hdr->width = static_cast<uint16_t>(ddsh.dwWidth);
+    hdr->height = static_cast<uint16_t>(ddsh.dwHeight);
+    hdr->arraySize = arraySize;
+    hdr->layerCount = meta.layerCount; // +0x11 cubemap flag (RSX drops it from the DDS)
+
+    // texture arrays cannot be streamed (v8 invariant) -> force all permanent.
+    const uint8_t strmMips = (arraySize > 1) ? 0 : meta.strmMips;
+    const uint8_t optMips = (arraySize > 1) ? 0 : meta.optMips;
+    if (static_cast<unsigned>(strmMips) + optMips >= ddsh.dwMipMapCount)
+        Error("Texture \"%s\": streamed mip count (%u+%u) exceeds mip count %u.\n", assetPath, strmMips, optMips, ddsh.dwMipMapCount);
+
+    hdr->permanentMipLevels = static_cast<uint8_t>(ddsh.dwMipMapCount - strmMips - optMips);
+    hdr->streamedMipLevels = strmMips;
+    hdr->optStreamedMipLevels = optMips;
+
+    // per-mip size/aligned size (same for every array slice -- depends only on the
+    // mip dimensions), plus per-(slice,mip) DDS file offset. The DDS stores array
+    // textures slice-major, mip-minor (largest mip first), so file offsets accumulate
+    // by slicePitch across slices then mips. All mips are stored permanently here.
+    struct MipInfo_s { uint32_t size; uint32_t alignedSize; };
+    std::vector<MipInfo_s> mips(ddsh.dwMipMapCount);
+    std::vector<std::vector<size_t>> fileOffset(arraySize, std::vector<size_t>(ddsh.dwMipMapCount));
+
+    // mip index 0 = largest. The streamed mips are the LARGEST: optMips (indices
+    // [0..optMips)) go to the optional starpak, the next strmMips to the mandatory
+    // starpak; the permanent (smallest) mips [firstPermMip..N) are packed into the rpak.
+    const unsigned int firstPermMip = static_cast<unsigned int>(optMips) + strmMips;
+    size_t permanentDataSize = 0;
+    size_t mipOffset = isDX10 ? 0x94 : 0x80;
+
+    for (unsigned int slice = 0; slice < arraySize; slice++)
+    {
+        for (unsigned int m = 0; m < ddsh.dwMipMapCount; m++)
+        {
+            uint16_t mipWidth = 0;
+            if ((hdr->width >> m) > 1) mipWidth = static_cast<uint16_t>((hdr->width >> m) - 1);
+
+            uint16_t mipHeight = 0;
+            if ((hdr->height >> m) > 1) mipHeight = static_cast<uint16_t>((hdr->height >> m) - 1);
+
+            const auto& bpp = s_pBytesPerPixel[hdr->imgFormat];
+            const uint32_t bppWidth = (bpp.y + mipWidth) >> (bpp.y >> 1);
+            const uint32_t bppHeight = (bpp.y + mipHeight) >> (bpp.y >> 1);
+            const uint32_t slicePitch = bpp.x * bppWidth * bppHeight;
+
+            if (slice == 0)
+            {
+                mips[m] = { slicePitch, IALIGN16(slicePitch) };
+                // dataSize is the total logical size across ALL sources (perm + streamed),
+                // matching the v8 writer; the rpak data lump only holds the permanent mips.
+                hdr->dataSize += IALIGN16(slicePitch) * arraySize;
+                if (m >= firstPermMip)
+                    permanentDataSize += static_cast<size_t>(IALIGN16(slicePitch)) * arraySize;
+            }
+
+            fileOffset[slice][m] = mipOffset;
+            mipOffset += slicePitch;
+        }
+    }
+
+    // permanent data lump: only the smallest (permanent) mips, mip-major (smallest
+    // first), slice-minor. Within each mip the array slices are a contiguous block
+    // (slice i at alignedSize*i), matching the v8 array layout.
+    PakPageLump_s dataChunk = pak->CreatePageLump(permanentDataSize, SF_CPU | SF_TEMP, 16);
+    char* pCur = dataChunk.data;
+
+    for (int m = static_cast<int>(ddsh.dwMipMapCount) - 1; m >= static_cast<int>(firstPermMip); m--) // smallest perm mip first
+    {
+        for (unsigned int slice = 0; slice < arraySize; slice++)
+        {
+            input.SeekGet(fileOffset[slice][m]);
+            input.Read(pCur + mips[m].alignedSize * slice, mips[m].size);
+        }
+        pCur += mips[m].alignedSize * arraySize;
+    }
+
+    if (pak->IsFlagSet(PF_KEEP_DEV))
+    {
+        char pathStem[PAK_MAX_STEM_PATH];
+        const size_t stemLen = Pak_ExtractAssetStem(assetPath, pathStem, sizeof(pathStem), "texture");
+
+        if (stemLen > 0)
+        {
+            PakPageLump_s nameChunk = pak->CreatePageLump(stemLen + 1, SF_CPU | SF_DEV, 1);
+            memcpy(nameChunk.data, pathStem, stemLen + 1);
+            pak->AddPointer(hdrChunk, offsetof(TextureAssetHeader_v10_t, name), nameChunk, 0);
+        }
+    }
+
+    // Overlay the source pak's header block [0x14..0x37] verbatim (dataSize +
+    // perm/strm/opt counts + type + compTypePacked/compressedBytes/unk metadata) for a
+    // byte-exact 1:1 header; the structural fields [0x00..0x13] stay computed+validated.
+    if (meta.hasTail)
+        memcpy(reinterpret_cast<uint8_t*>(hdr) + TXTR_V10_TAIL_OFF, meta.hdrTail, sizeof(meta.hdrTail));
+    else if ((strmMips + optMips) > 0)
+    {
+        // +0x1B is minStreamableMipsToLoad. 0 underflows unsigned in the
+        // client's stream request builder and overruns the mip malloc.
+        Warning("Texture \"%s\": streamed mips without $hdrTail; synthesizing v10 tail.\n", assetPath);
+        hdr->unk_1B = 1;
+        hdr->unkMipLevels = 0;
+        hdr->compTypePacked = 0;
+        uint32_t streamedBytes = 0;
+        const unsigned int streamedCount = static_cast<unsigned int>(strmMips) + optMips;
+        const unsigned int n = streamedCount < 7u ? streamedCount : 7u;
+        for (unsigned int m = 0; m < n; m++)
+        {
+            const uint32_t sz = mips[m].alignedSize;
+            hdr->compressedBytes[m] = static_cast<uint16_t>((sz - 1u) / 4096u);
+            streamedBytes += sz;
+        }
+        hdr->dataSize = streamedBytes;
+    }
+
+    // Streamed mips: largest-first (mip 0 first). Permanent rpak mips are smallest-first --
+    // flipping this order keeps the entry size and corrupts the pixels.
+    auto writeStreamedRange = [&](const unsigned int loMip, const unsigned int hiMip, const PakStreamSet_e set) -> PakStreamSetEntry_s
+    {
+        size_t streamedSize = 0;
+        for (unsigned int m = loMip; m < hiMip; m++)
+            streamedSize += static_cast<size_t>(mips[m].alignedSize) * arraySize;
+
+        const size_t pageAligned = IALIGN(streamedSize, STARPAK_DATABLOCK_ALIGNMENT);
+        char* const sbuf = new char[pageAligned](); // zero-init (per-mip padding + page tail = zeros, matches kral)
+
+        char* pCur = sbuf;
+        for (unsigned int m = loMip; m < hiMip; m++) // LARGEST streamed mip first (matches kral/engine)
+        {
+            for (unsigned int slice = 0; slice < arraySize; slice++)
+            {
+                input.SeekGet(fileOffset[slice][m]);
+                input.Read(pCur + mips[m].alignedSize * slice, mips[m].size);
+            }
+            pCur += mips[m].alignedSize * arraySize;
+        }
+
+        const PakStreamSetEntry_s entry = pak->AddStreamingDataEntry(pageAligned, (uint8_t*)sbuf, set);
+        delete[] sbuf;
+        return entry;
+    };
+
+    PakStreamSetEntry_s mandatoryStream;
+    PakStreamSetEntry_s optionalStream;
+    pak->TryReuseStreaming(assetGuid, &mandatoryStream, &optionalStream);
+
+    if (strmMips > 0 && mandatoryStream.streamOffset < 0)
+        mandatoryStream = writeStreamedRange(optMips, firstPermMip, STREAMING_SET_MANDATORY);
+
+    if (optMips > 0 && optionalStream.streamOffset < 0)
+        optionalStream = writeStreamedRange(0, optMips, STREAMING_SET_OPTIONAL);
+
+    asset.InitAsset(hdrChunk.GetPointer(), sizeof(TextureAssetHeader_v10_t), dataChunk.GetPointer(), 10, AssetType::TXTR,
+        strmMips > 0 ? mandatoryStream.streamOffset : -1, strmMips > 0 ? mandatoryStream.streamIndex : -1,
+        optMips > 0 ? optionalStream.streamOffset : -1, optMips > 0 ? optionalStream.streamIndex : -1);
+    asset.SetHeaderPointer(hdrChunk.data);
+
+    pak->FinishAsset();
+}
+
+void Assets::AddTextureAsset_v10(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry)
+{
+    TextureV10Meta_s meta;
+
+    meta.strmMips = static_cast<uint8_t>(JSON_GetValueOrDefault(mapEntry, "$strmMips", 0u));
+    meta.optMips = static_cast<uint8_t>(JSON_GetValueOrDefault(mapEntry, "$optMips", 0u));
+    meta.layerCount = static_cast<uint8_t>(JSON_GetValueOrDefault(mapEntry, "$layerCount", 0u));
+    meta.starpakOff = JSON_GetValueOrDefault(mapEntry, "$starpakOff", static_cast<int64_t>(-1));
+    meta.optStarpakOff = JSON_GetValueOrDefault(mapEntry, "$optStarpakOff", static_cast<int64_t>(-1));
+
+    // $hdrTail = hex of the source pak's header bytes [0x1B..0x37] (29B), copied verbatim.
+    const char* const tailHex = JSON_GetValueOrDefault(mapEntry, "$hdrTail", static_cast<const char*>(nullptr));
+    if (tailHex)
+    {
+        const size_t hexLen = strlen(tailHex);
+        if (hexLen != sizeof(meta.hdrTail) * 2)
+            Error("Texture \"%s\": $hdrTail must be %zu hex chars, got %zu.\n", assetPath, sizeof(meta.hdrTail) * 2, hexLen);
+
+        for (size_t i = 0; i < sizeof(meta.hdrTail); i++)
+            meta.hdrTail[i] = static_cast<uint8_t>(strtoul(std::string(tailHex + i * 2, 2).c_str(), nullptr, 16));
+
+        meta.hasTail = true;
+    }
+
+    Texture_InternalAddTexture_v10(pak, assetGuid, assetPath, meta);
+}
+
 bool Texture_AutoAddTexture(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const bool forceDisableStreaming)
 {
     PakAsset_t* const existingAsset = pak->GetAssetByGuid(assetGuid, nullptr, true);
@@ -431,13 +695,19 @@ bool Texture_AutoAddTexture(CPakFileBuilder* const pak, const PakGuid_t assetGui
         return false; // already present in the pak.
 
     Debug("Auto-adding 'txtr' asset \"%s\".\n", assetPath);
-    Texture_InternalAddTexture(pak, assetGuid, assetPath, forceDisableStreaming);
+
+    // S21 (pak v8, non-dedi) must use the v10 writer. Material auto-add used to
+    // call Texture_InternalAddTexture (v8) and ship txtr v8 that AVs on S21 load.
+    if (pak->GetVersion() >= 8 && !pak->IsFlagSet(PF_DEDI))
+    {
+        TextureV10Meta_s meta{};
+        UNUSED(forceDisableStreaming);
+        Texture_InternalAddTexture_v10(pak, assetGuid, assetPath, meta);
+    }
+    else
+    {
+        Texture_InternalAddTexture(pak, assetGuid, assetPath, forceDisableStreaming);
+    }
 
     return true;
-}
-
-void Assets::AddTextureAsset_v8(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry)
-{
-    const bool disableStreaming = JSON_GetValueOrDefault(mapEntry, "$disableStreaming", false);
-    Texture_InternalAddTexture(pak, assetGuid, assetPath, disableStreaming);
 }

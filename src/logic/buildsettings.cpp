@@ -32,6 +32,14 @@ void CBuildSettings::Init(const js::Document& doc, const char* const buildMapFil
 	// Create output directory if it does not exist yet.
 	fs::create_directories(m_outputPath);
 
+	// S3 dedicated-server pak: route mdl_/aseq/arig to the S3 asset versions
+	// (v10/v7/v4). A dedi server pak carries no client-only data (vertex groups,
+	// materials, textures), so client-only scope defaults off for a dedi build.
+	const bool isDedi = JSON_GetValueOrDefault(doc, "dedi", false);
+
+	if (isDedi)
+		AddFlags(PF_DEDI);
+
 	// Should dev-only data be kept - e.g. texture asset names, shader names, etc.
 	if (JSON_GetValueOrDefault(doc, "keepDevOnly", false))
 		AddFlags(PF_KEEP_DEV);
@@ -39,7 +47,7 @@ void CBuildSettings::Init(const js::Document& doc, const char* const buildMapFil
 	if (JSON_GetValueOrDefault(doc, "keepServerOnly", true))
 		AddFlags(PF_KEEP_SERVER);
 
-	if (JSON_GetValueOrDefault(doc, "keepClientOnly", true))
+	if (JSON_GetValueOrDefault(doc, "keepClientOnly", !isDedi))
 		AddFlags(PF_KEEP_CLIENT);
 
 	g_showDebugLogs = JSON_GetValueOrDefault(doc, "showDebugInfo", false);

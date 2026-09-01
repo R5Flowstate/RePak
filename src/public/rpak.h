@@ -28,8 +28,10 @@
 #define TYPE_TXTR	MAKE_FOURCC('t', 'x', 't', 'r') // txtr
 #define TYPE_TXAN	MAKE_FOURCC('t', 'x', 'a', 'n') // txan
 #define TYPE_TXLS	MAKE_FOURCC('t', 'x', 'l', 's') // txls
+#define TYPE_TXTX	MAKE_FOURCC('t', 'x', 't', 'x') // txtx
 #define TYPE_RMDL	MAKE_FOURCC('m', 'd', 'l', '_') // mdl_
 #define TYPE_UIMG	MAKE_FOURCC('u', 'i', 'm', 'g') // uimg
+#define TYPE_UIIA	MAKE_FOURCC('u', 'i', 'i', 'a') // uiia
 #define TYPE_RLCD	MAKE_FOURCC('r', 'l', 'c', 'd') // rlcd
 #define TYPE_PTCH	MAKE_FOURCC('P', 't', 'c', 'h') // Ptch
 #define TYPE_DTBL	MAKE_FOURCC('d', 't', 'b', 'l') // dtbl
@@ -41,7 +43,12 @@
 #define TYPE_ARIG	MAKE_FOURCC('a', 'r', 'i', 'g') // arig
 #define TYPE_SHDS	MAKE_FOURCC('s', 'h', 'd', 's') // shds
 #define TYPE_SHDR	MAKE_FOURCC('s', 'h', 'd', 'r') // shdr
+#define TYPE_RSON	MAKE_FOURCC('r', 's', 'o', 'n') // rson
+#define TYPE_FONT	MAKE_FOURCC('f', 'o', 'n', 't') // font
 #define TYPE_UI     MAKE_FOURCC('u', 'i',   0,   0) // ui
+#define TYPE_WRAP	MAKE_FOURCC('w', 'r', 'a', 'p') // wrap
+#define TYPE_RMAP	MAKE_FOURCC('r', 'm', 'a', 'p') // rmap
+#define TYPE_EFCT	MAKE_FOURCC('e', 'f', 'c', 't') // efct
 
 enum class AssetType : uint32_t
 {
@@ -51,8 +58,10 @@ enum class AssetType : uint32_t
 	TXTR = TYPE_TXTR, // texture
 	TXAN = TYPE_TXAN, // texture animation
 	TXLS = TYPE_TXLS, // texture list
+	TXTX = TYPE_TXTX, // texture extra (small inline float/RGBA data blob)
 	RMDL = TYPE_RMDL, // model
 	UIMG = TYPE_UIMG, // ui image atlas
+	UIIA = TYPE_UIIA, // ui image atlas (v2: 64B header + raw tile blob)
 	RLCD = TYPE_RLCD, // lcd screen effect
 	PTCH = TYPE_PTCH, // patch
 	DTBL = TYPE_DTBL, // datatable
@@ -64,7 +73,12 @@ enum class AssetType : uint32_t
 	ARIG = TYPE_ARIG, // animation rig
 	SHDS = TYPE_SHDS, // shaderset
 	SHDR = TYPE_SHDR, // shader
-	UI   = TYPE_UI    // ui
+	RSON = TYPE_RSON, // rson file
+	FONT = TYPE_FONT, // ui font atlas
+	UI   = TYPE_UI,   // ui
+	WRAP = TYPE_WRAP, // wrapped raw file
+	RMAP = TYPE_RMAP, // map asset
+	EFCT = TYPE_EFCT  // particle effect
 };
 
 #pragma pack(push, 1)
@@ -228,8 +242,6 @@ struct PakAsset_t
 	int64_t starpakIndex : 12 = -1;
 	int64_t optStarpakOffset : 52 = -1;
 	int64_t optStarpakIndex : 12 = -1;
-
-	bool HasAnyStreamedData() const { return starpakOffset != -1 || optStarpakOffset != -1; };
 
 	uint16_t pageEnd = 0; // highest mem page used by this asset
 

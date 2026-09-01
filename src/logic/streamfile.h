@@ -19,6 +19,7 @@ public:
 	void Init(const js::Document& doc, const bool useOptional);
 	void Shutdown();
 
+	void AdoptExistingStreamFile(BinaryIO& out, const std::string& fullFilePath, const PakStreamSet_e set, const int64_t fileSize);
 	void CreateStreamFileStream(const std::string& streamFilePath, const PakStreamSet_e set);
 	void FinishStreamFileStream(const PakStreamSet_e set);
 

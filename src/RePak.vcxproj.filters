@@ -63,6 +63,9 @@
     <ClCompile Include="application\repak.cpp">
       <Filter>application</Filter>
     </ClCompile>
+    <ClCompile Include="assets\map.cpp">
+      <Filter>assets</Filter>
+    </ClCompile>
     <ClCompile Include="assets\model.cpp">
       <Filter>assets</Filter>
     </ClCompile>
@@ -216,6 +219,9 @@
     <ClCompile Include="assets\texture_anim.cpp">
       <Filter>assets</Filter>
     </ClCompile>
+    <ClCompile Include="assets\texture_extra.cpp">
+      <Filter>assets</Filter>
+    </ClCompile>
     <ClCompile Include="logic\streamfile.cpp">
       <Filter>logic</Filter>
     </ClCompile>
@@ -237,6 +243,9 @@
     <ClCompile Include="utils\zstdutils.cpp">
       <Filter>utils</Filter>
     </ClCompile>
+    <ClCompile Include="utils\oodle.cpp">
+      <Filter>utils</Filter>
+    </ClCompile>
     <ClCompile Include="assets\material_for_aspect.cpp">
       <Filter>assets</Filter>
     </ClCompile>
@@ -247,6 +256,12 @@
       <Filter>assets</Filter>
     </ClCompile>
     <ClCompile Include="assets\ui_image_atlas.cpp">
+      <Filter>assets</Filter>
+    </ClCompile>
+    <ClCompile Include="assets\rson.cpp">
+      <Filter>assets</Filter>
+    </ClCompile>
+    <ClCompile Include="assets\wrap.cpp">
       <Filter>assets</Filter>
     </ClCompile>
     <ClCompile Include="assets\lcd_screen_effect.cpp">
@@ -294,6 +309,9 @@
       <Filter>logic</Filter>
     </ClInclude>
     <ClInclude Include="public\studio.h">
+      <Filter>public</Filter>
+    </ClInclude>
+    <ClInclude Include="public\map.h">
       <Filter>public</Filter>
     </ClInclude>
     <ClInclude Include="public\material.h">
@@ -596,6 +614,9 @@
     <ClInclude Include="public\texture_anim.h">
       <Filter>public</Filter>
     </ClInclude>
+    <ClInclude Include="public\texture_extra.h">
+      <Filter>public</Filter>
+    </ClInclude>
     <ClInclude Include="thirdparty\zstd\compress\zstd_preSplit.h">
       <Filter>thirdparty\zstandard\compress</Filter>
     </ClInclude>
@@ -603,6 +624,9 @@
       <Filter>public</Filter>
     </ClInclude>
     <ClInclude Include="utils\zstdutils.h">
+      <Filter>utils</Filter>
+    </ClInclude>
+    <ClInclude Include="utils\oodle.h">
       <Filter>utils</Filter>
     </ClInclude>
     <ClInclude Include="public\material_for_aspect.h">
@@ -615,6 +639,12 @@
       <Filter>public</Filter>
     </ClInclude>
     <ClInclude Include="public\rui_package.h">
+      <Filter>public</Filter>
+    </ClInclude>
+    <ClInclude Include="public\rson.h">
+      <Filter>public</Filter>
+    </ClInclude>
+    <ClInclude Include="public\wrap.h">
       <Filter>public</Filter>
     </ClInclude>
     <ClInclude Include="public\ui.h">

@@ -131,6 +131,36 @@ struct TextureAssetHeader_t : public TextureDesc_t
 	int64_t numPixels; // reserved for the runtime.
 };
 
+#pragma pack(push, 1)
+// S21-native texture header (asset version 10). Different layout from v8: name
+// first (no guid in the header), imgFormat before dims, and per-streamed-mip
+// compression info (compTypePacked/compressedBytes). 56 bytes.
+struct TextureAssetHeader_v10_t
+{
+	PagePtr_t name;             // +0x00
+	uint16_t imgFormat;         // +0x08 (eTextureFormat)
+	uint16_t width;             // +0x0A
+	uint16_t height;            // +0x0C
+	uint16_t depth;             // +0x0E
+	uint8_t arraySize;          // +0x10
+	uint8_t layerCount;         // +0x11 (cubemap if & 2)
+	uint8_t unk_12;             // +0x12
+	uint8_t usageFlags;         // +0x13
+	uint32_t dataSize;          // +0x14 total data size across all sources
+	uint8_t permanentMipLevels; // +0x18
+	uint8_t streamedMipLevels;  // +0x19
+	uint8_t optStreamedMipLevels;// +0x1A
+	uint8_t unk_1B;             // +0x1B minStreamableMipsToLoad; must be >=1 if streamed
+	uint8_t unkMipLevels;       // +0x1C (added in v10)
+	uint8_t type;               // +0x1D (eTextureType)
+	uint16_t compTypePacked;    // +0x1E 2 bits per streamed mip (0 = uncompressed)
+	uint16_t compressedBytes[7];// +0x20 per streamed mip
+	uint16_t unk_2E;            // +0x2E
+	uint8_t unk_30[8];          // +0x30 filled per streamed mip
+};
+static_assert(sizeof(TextureAssetHeader_v10_t) == 56);
+#pragma pack(pop)
+
 struct UIImageAtlasHeader_t
 {
 	float widthRatio; // 1 / m_nWidth

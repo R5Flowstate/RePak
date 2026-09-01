@@ -96,8 +96,8 @@ static void Material_AddTextureRefs(CPakFileBuilder* const pak, PakPageLump_s& d
 
         Pak_RegisterGuidRefAtOffset(textureGuid, offset, dataChunk, asset);
 
-        if (!pak->GetAssetByGuid(textureGuid))
-            Warning("Texture #%zu (bind point #%zu) not found on disk; treating as external reference.\n", curIndex, bindPoint);
+        //if (!pak->GetAssetByGuid(textureGuid))
+        //    Warning("Texture #%zu (bind point #%zu) not found on disk; treating as external reference.\n", curIndex, bindPoint);
     }
 }
 
@@ -321,6 +321,24 @@ static std::string Material_GetUberPath(CPakFileBuilder* const pak, MaterialAsse
     return Utils::VFormat("%s%s.uber", pak->GetAssetPath().c_str(), hasPath ? path : matlAsset->path.c_str());
 }
 
+// S21 SKNP CBufUberStatic is 608 B. S3 v15 sidecars are 512. The 96-byte tail is
+// identical on every stock S21 SKNP of shaderSet 0xA5708059910DDC66 (304/304).
+static const uint8_t s_s21SknpUberTail96[96] =
+{
+	0x00, 0x00, 0x40, 0x40, 0x00, 0x00, 0x40, 0x40,
+	0x00, 0x00, 0x40, 0x40, 0x00, 0x00, 0x80, 0x3E,
+	0x00, 0x00, 0x80, 0x3F, 0x00, 0x00, 0x80, 0x3F,
+	0x00, 0x00, 0x80, 0x3F, 0x00, 0x00, 0x80, 0x3F,
+	0x00, 0x00, 0x80, 0x3F, 0x00, 0x00, 0x80, 0x3F,
+	0x0C, 0xBB, 0x03, 0x3A, 0xCF, 0xA9, 0xA4, 0xBB,
+	0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+	0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+	0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
 template <typename MaterialShaderBuffer_t>
 static void Material_AddUberData(CPakFileBuilder* const pak, MaterialAsset_t* const matlAsset, const rapidjson::Value& mapEntry,
     PakPageLump_s& uberBufChunk, size_t& staticBufSize)
@@ -330,10 +348,34 @@ static void Material_AddUberData(CPakFileBuilder* const pak, MaterialAsset_t* co
 
     if (uberFile.Open(uberPath, BinaryIO::Mode_e::Read))
     {
-        staticBufSize = uberFile.GetSize();
-        uberBufChunk = pak->CreatePageLump(sizeof(MaterialCPUHeader) + staticBufSize, SF_CPU | SF_TEMP, 8);
+        const size_t fileSize = static_cast<size_t>(uberFile.GetSize());
+        if (fileSize == 0 || fileSize > 1024)
+            Error("Uber \"%s\" is %zu bytes; expected 1..1024.\n", uberPath.c_str(), fileSize);
 
-        uberFile.Read(uberBufChunk.data + sizeof(MaterialCPUHeader), staticBufSize);
+        uint8_t uberBytes[1024];
+        memset(uberBytes, 0, sizeof(uberBytes));
+        uberFile.Read(uberBytes, fileSize);
+        staticBufSize = fileSize;
+
+        if (matlAsset->assetVersion >= 23)
+        {
+            const MaterialShaderType_e t = matlAsset->materialType;
+            if ((t == PTCU || t == PTCS) && staticBufSize == 240)
+            {
+                Error("Particle uber \"%s\" is 240 bytes (S30). S21 PTCU/PTCS is 144. Convert before packing.\n",
+                    uberPath.c_str());
+            }
+            if ((t == SKNU || t == SKNP || t == SKNC) && staticBufSize == 512)
+            {
+                Warning("SKN uber \"%s\" is 512 bytes; S21 is 608. Padding stock SKNP tail.\n",
+                    uberPath.c_str());
+                memcpy(uberBytes + 512, s_s21SknpUberTail96, sizeof(s_s21SknpUberTail96));
+                staticBufSize = 608;
+            }
+        }
+
+        uberBufChunk = pak->CreatePageLump(sizeof(MaterialCPUHeader) + staticBufSize, SF_CPU | SF_TEMP, 8);
+        memcpy(uberBufChunk.data + sizeof(MaterialCPUHeader), uberBytes, staticBufSize);
     }
     else
     {
@@ -368,7 +410,7 @@ static void Material_HandleShaderSet(CPakFileBuilder* const pak, const rapidjson
     material->shaderSet = Pak_ParseGuidFromMap(mapEntry, "shaderSet", "shader set", shaderSetName, true);
 
     if (shaderSetName)
-        ShaderSet_AutoAddShaderSet(pak, material->shaderSet, shaderSetName, material->assetVersion == 12 ? 8 : 11);
+        ShaderSet_AutoAddShaderSet(pak, material->shaderSet, shaderSetName, material->assetVersion == 12 ? 8 : (material->assetVersion >= 23 ? 12 : 11));
 }
 
 extern bool TextureAnim_AutoAddTextureAnim(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath);
@@ -391,11 +433,11 @@ void MaterialAsset_t::FromJSON(const rapidjson::Value& mapEntry)
         Error("Material shader type '%s' is unsupported.\n", this->materialTypeStr.c_str());
 
     // this only seems to be in apex? heavily affects how the buffers are setup
-    // and which one is selected at Pak_LoadMaterialAsset(). Func sub_1403B4680
+    // and which one is selected at Pak_LoadMaterialAsset(). The loader
     // also checks if this flag is '4' and materialType is 'PTCS'. The material
     // "particle/smoke/smoke_charge02_close" (PTCU) for instance, has this set
     // to 4, and 4 uses a different global buffer if this (flag & 253) != 0
-    if (this->assetVersion == 15)
+    if (this->assetVersion >= 15)
         this->uberBufferFlags = (uint8_t)JSON_GetNumberRequired<int>(mapEntry, "uberBufferFlags");
 
     // material max dimensions
@@ -430,6 +472,21 @@ void MaterialAsset_t::FromJSON(const rapidjson::Value& mapEntry)
     this->features = JSON_GetNumberRequired<uint32_t>(mapEntry, "features");
 
     Material_SetDXStates(mapEntry, dxStates);
+
+    // v23 byte-1:1 params (RSX export; raw bits). Optional -> 0 if absent (S3 v15 / older jsons).
+    if (this->assetVersion >= 23)
+    {
+        uint64_t dxStateUnk28 = 0;
+        JSON_ParseNumber(mapEntry, "dxStateUnk28", dxStateUnk28);
+        memcpy(this->dxStates[0].unk_28, &dxStateUnk28, sizeof(this->dxStates[0].unk_28));
+
+        JSON_ParseNumber(mapEntry, "unk_C0", this->v23_unk_C0);
+        JSON_ParseNumber(mapEntry, "unk_CC", this->v23_unk_CC);
+        JSON_ParseNumber(mapEntry, "unk_E8", this->v23_unk_E8);
+        JSON_ParseNumber(mapEntry, "unk_EA", this->v23_unk_EC); // RSX names 0xEC "unk_EA"
+        JSON_ParseNumber(mapEntry, "unk_84", this->v23_unk_84);
+        JSON_ParseNumber(mapEntry, "unk_F0", this->v23_unk_F0);
+    }
 }
 
 void Material_SetTitanfall2Preset(MaterialAsset_t* const material, const std::string& presetName)
@@ -699,7 +756,12 @@ static void Material_InternalAddMaterialV15(CPakFileBuilder* const pak, const Pa
     }
 
     Pak_RegisterGuidRefAtOffset(matlAsset.shaderSet, offsetof(MaterialAssetHeader_v15_t, shaderSet), hdrChunk, asset);
-    Pak_RegisterGuidRefAtOffset(matlAsset.textureAnimation, offsetof(MaterialAssetHeader_v15_t, textureAnimation), hdrChunk, asset);
+    // textureAnimation moved 0xF8 (v15) -> 0xD0 (v23); register at the version-correct offset so
+    // the guidDesc points at the guid the engine actually reads (else guid-consistency error).
+    Pak_RegisterGuidRefAtOffset(matlAsset.textureAnimation,
+        matlAsset.assetVersion >= 23 ? offsetof(MaterialAssetHeader_v23_t, textureAnimation)
+                                     : offsetof(MaterialAssetHeader_v15_t, textureAnimation),
+        hdrChunk, asset);
 
     // write header now that we are done setting it up
     matlAsset.WriteToBuffer(hdrChunk.data);
@@ -720,7 +782,9 @@ static void Material_InternalAddMaterialV15(CPakFileBuilder* const pak, const Pa
 
     //////////////////////////////////////////
 
-    asset.InitAsset(hdrChunk.GetPointer(), hdrChunk.size, uberBufChunk.GetPointer(), 15, AssetType::MATL);
+    // S21 materials are asset version 23; their on-disk header is the same 256-byte
+    // v15-family layout, so the only difference from v15 is the version field.
+    asset.InitAsset(hdrChunk.GetPointer(), hdrChunk.size, uberBufChunk.GetPointer(), matlAsset.assetVersion, AssetType::MATL);
     asset.SetHeaderPointer(hdrChunk.data);
 
     pak->FinishAsset();
@@ -779,4 +843,11 @@ void Assets::AddMaterialAsset_v12(CPakFileBuilder* const pak, const PakGuid_t as
 void Assets::AddMaterialAsset_v15(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry)
 {
     Material_InternalAddMaterial(pak, assetGuid, assetPath, &mapEntry, 15);
+}
+
+// S21-native (asset version 23). Same 256-byte v15-family header; only the asset
+// version differs. Consumes RSX's material .json (+ raw .uber via $uber).
+void Assets::AddMaterialAsset_v23(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry)
+{
+    Material_InternalAddMaterial(pak, assetGuid, assetPath, &mapEntry, 23);
 }

@@ -40,5 +40,6 @@ namespace rapidjson { typedef ::std::size_t SizeType; }
 #include "utils/strutils.h"
 #include "utils/jsonutils.h"
 #include "utils/logger.h"
+#include "utils/scratch.h"
 
 #define UNUSED(x)	(void)(x)

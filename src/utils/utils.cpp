@@ -6,6 +6,52 @@
 #include "pch.h"
 #include "utils.h"
 #include "rapidjson/error/en.h"
+#define NOMINMAX
+#include <windows.h>
+#include <limits>
+#include <cctype>
+#include <limits>
+
+namespace
+{
+constexpr uint64_t kFileTimeTicksPerSecond = 10000000ULL;
+constexpr uint64_t kUnixEpochToFileTimeOffset = 116444736000000000ULL;
+constexpr uint64_t kMaxUnixSeconds = (0xFFFFFFFFFFFFFFFFULL - kUnixEpochToFileTimeOffset) / kFileTimeTicksPerSecond;
+
+bool ConvertUnixSecondsToFileTime(const uint64_t seconds, FILETIME& outFileTime)
+{
+    if (seconds > kMaxUnixSeconds)
+        return false;
+
+    const uint64_t fileTimeTicks = seconds * kFileTimeTicksPerSecond + kUnixEpochToFileTimeOffset;
+    outFileTime.dwLowDateTime = static_cast<DWORD>(fileTimeTicks);
+    outFileTime.dwHighDateTime = static_cast<DWORD>(fileTimeTicks >> 32);
+    return true;
+}
+
+bool ParseFixedWidthInt(const char* const str, const size_t len, const size_t offset, const size_t width,
+    const int minValue, const int maxValue, int& outValue)
+{
+    if ((offset + width) > len)
+        return false;
+
+    int value = 0;
+    for (size_t i = 0; i < width; ++i)
+    {
+        const char c = str[offset + i];
+        if (c < '0' || c > '9')
+            return false;
+
+        value = (value * 10) + (c - '0');
+    }
+
+    if (value < minValue || value > maxValue)
+        return false;
+
+    outValue = value;
+    return true;
+}
+}
 
 //-----------------------------------------------------------------------------
 // purpose: gets size of the specified file
@@ -67,6 +113,163 @@ FILETIME Utils::GetSystemFileTime()
 	return ft;
 }
 
+bool Utils::TryParseUnixTimestampToFileTime(int64_t seconds, FILETIME& outFileTime)
+{
+    if (seconds < 0)
+        return false;
+
+    return ConvertUnixSecondsToFileTime(static_cast<uint64_t>(seconds), outFileTime);
+}
+
+bool Utils::TryParseUnixTimestampToFileTime(uint64_t seconds, FILETIME& outFileTime)
+{
+    return ConvertUnixSecondsToFileTime(seconds, outFileTime);
+}
+
+bool Utils::TryParseIso8601UtcToFileTime(const char* const value, const size_t length, FILETIME& outFileTime)
+{
+    if (!value || length == 0)
+        return false;
+
+    size_t begin = 0;
+    size_t end = length;
+
+    while (begin < end && std::isspace(static_cast<unsigned char>(value[begin])))
+        ++begin;
+    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1])))
+        --end;
+
+    if ((end - begin) < 10)
+        return false;
+
+    const char* const trimmed = value + begin;
+    const size_t trimmedLength = end - begin;
+
+    if (trimmedLength < 10 || trimmed[4] != '-' || trimmed[7] != '-')
+        return false;
+
+    int year;
+    int month;
+    int day;
+
+    if (!ParseFixedWidthInt(trimmed, trimmedLength, 0, 4, 1601, 30827, year))
+        return false;
+    if (!ParseFixedWidthInt(trimmed, trimmedLength, 5, 2, 1, 12, month))
+        return false;
+    if (!ParseFixedWidthInt(trimmed, trimmedLength, 8, 2, 1, 31, day))
+        return false;
+
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    int tzOffsetMinutes = 0;
+    size_t pos = 10;
+
+    if (trimmedLength > pos)
+    {
+        const char separator = trimmed[pos];
+        if (separator != 'T' && separator != 't' && separator != ' ')
+            return false;
+        ++pos;
+
+        if (!ParseFixedWidthInt(trimmed, trimmedLength, pos, 2, 0, 23, hour))
+            return false;
+        pos += 2;
+
+        if (pos >= trimmedLength || trimmed[pos] != ':')
+            return false;
+        ++pos;
+
+        if (!ParseFixedWidthInt(trimmed, trimmedLength, pos, 2, 0, 59, minute))
+            return false;
+        pos += 2;
+
+        if (pos < trimmedLength && trimmed[pos] == ':')
+        {
+            ++pos;
+            if (!ParseFixedWidthInt(trimmed, trimmedLength, pos, 2, 0, 59, second))
+                return false;
+            pos += 2;
+        }
+
+        if (pos < trimmedLength && trimmed[pos] == '.')
+        {
+            ++pos;
+            while (pos < trimmedLength && std::isdigit(static_cast<unsigned char>(trimmed[pos])))
+                ++pos;
+        }
+
+        if (pos < trimmedLength)
+        {
+            const char tz = trimmed[pos];
+            if (tz == 'Z' || tz == 'z')
+            {
+                ++pos;
+            }
+            else if (tz == '+' || tz == '-')
+            {
+                const int sign = (tz == '+') ? 1 : -1;
+                ++pos;
+
+                int tzHour;
+                if (!ParseFixedWidthInt(trimmed, trimmedLength, pos, 2, 0, 23, tzHour))
+                    return false;
+                pos += 2;
+
+                if (pos < trimmedLength && trimmed[pos] == ':')
+                    ++pos;
+
+                int tzMinute;
+                if (!ParseFixedWidthInt(trimmed, trimmedLength, pos, 2, 0, 59, tzMinute))
+                    return false;
+                pos += 2;
+
+                tzOffsetMinutes = sign * (tzHour * 60 + tzMinute);
+            }
+            else
+            {
+                return false;
+            }
+
+            if (pos != trimmedLength)
+                return false;
+        }
+    }
+
+    SYSTEMTIME st{};
+    st.wYear = static_cast<WORD>(year);
+    st.wMonth = static_cast<WORD>(month);
+    st.wDay = static_cast<WORD>(day);
+    st.wHour = static_cast<WORD>(hour);
+    st.wMinute = static_cast<WORD>(minute);
+    st.wSecond = static_cast<WORD>(second);
+    st.wMilliseconds = 0;
+
+    FILETIME ft{};
+    if (!SystemTimeToFileTime(&st, &ft))
+        return false;
+
+    if (tzOffsetMinutes != 0)
+    {
+        ULARGE_INTEGER ticks;
+        ticks.HighPart = ft.dwHighDateTime;
+        ticks.LowPart = ft.dwLowDateTime;
+
+        int64_t signedTicks = static_cast<int64_t>(ticks.QuadPart);
+        signedTicks -= static_cast<int64_t>(tzOffsetMinutes) * 60LL * static_cast<int64_t>(kFileTimeTicksPerSecond);
+
+        if (signedTicks < 0)
+            return false;
+
+        ticks.QuadPart = static_cast<uint64_t>(signedTicks);
+        ft.dwLowDateTime = ticks.LowPart;
+        ft.dwHighDateTime = ticks.HighPart;
+    }
+
+    outFileTime = ft;
+    return true;
+}
+
 //-----------------------------------------------------------------------------
 // purpose: add backslash to the end of the string if not already present
 //-----------------------------------------------------------------------------
@@ -94,7 +297,24 @@ void Utils::FixSlashes(std::string& in, const char correctPathSeparator)
 //-----------------------------------------------------------------------------
 std::string Utils::ChangeExtension(const std::string& in, const std::string& ext)
 {
-	return std::filesystem::path(in).replace_extension(ext).string();
+	// Fast path for simple cases - avoid std::filesystem overhead
+	const size_t dotPos = in.find_last_of('.');
+	const size_t slashPos = in.find_last_of("/\\");
+
+	// Ensure extension starts with a dot (like std::filesystem::replace_extension does)
+	const std::string dotExt = ext.empty() ? "" : (ext[0] == '.' ? ext : '.' + ext);
+
+	// Only replace if dot is after the last slash (or if no slash exists)
+	if (dotPos != std::string::npos && (slashPos == std::string::npos || dotPos > slashPos))
+	{
+		std::string result = in;
+		result.resize(dotPos);
+		result += dotExt;
+		return result;
+	}
+
+	// No extension found, just append
+	return in + dotExt;
 }
 
 void Utils::ResolvePath(std::string& outPath, const std::filesystem::path& mapPath)
@@ -140,6 +360,34 @@ const char* Utils::ExtractFileName(const std::string& inPath)
         result = inPath.c_str();
 
     return result;
+}
+
+//-----------------------------------------------------------------------------
+// purpose: prints a progress bar to console
+//-----------------------------------------------------------------------------
+void Utils::ProgressPrint(size_t current, size_t total, const char* const label)
+{
+    if (total == 0)
+        return;
+
+    const int barWidth = 30;
+    const float progress = (float)current / total;
+    const int pos = (int)(barWidth * progress);
+
+    printf("\r%s[", label);
+    for (int i = 0; i < barWidth; i++)
+        printf(i < pos ? "=" : (i == pos ? ">" : " "));
+    printf("] %d%% (%zu/%zu)", (int)(progress * 100), current, total);
+    fflush(stdout);
+}
+
+//-----------------------------------------------------------------------------
+// purpose: completes the progress bar with a newline
+//-----------------------------------------------------------------------------
+void Utils::ProgressComplete()
+{
+    printf("\n");
+    fflush(stdout);
 }
 
 bool Util_ReplaceStream(BinaryIO& mainStream, BinaryIO& toSwap, const char* const mainPath, const char* const toSwapPath)
@@ -323,3 +571,4 @@ size_t Pak_ExtractAssetStem(const char* const assetPath, char* const outBuf, con
     outBuf[i] = '\0';
     return i;
 }
+

@@ -8,6 +8,7 @@
 #include "pakfile.h"
 #include "assets/assets.h"
 #include "utils/zstdutils.h"
+#include "utils/oodle.h"
 
 CPakFileBuilder::CPakFileBuilder(const CBuildSettings* const buildSettings, CStreamFileBuilder* const streamBuilder)
 {
@@ -18,23 +19,30 @@ CPakFileBuilder::CPakFileBuilder(const CBuildSettings* const buildSettings, CStr
 static std::unordered_set<PakAssetHandler_s, PakAssetHasher_s> s_pakAssetHandlers
 {
 	{"anir", PakAssetScope_e::kServerOnly, Assets::AddAnimRecording_v1, Assets::AddAnimRecording_v1},
-	{"txtr", PakAssetScope_e::kClientOnly, Assets::AddTextureAsset_v8, Assets::AddTextureAsset_v8},
+	{"txtr", PakAssetScope_e::kClientOnly, Assets::AddTextureAsset_v8, Assets::AddTextureAsset_v10},
 	{"txan", PakAssetScope_e::kClientOnly, nullptr, Assets::AddTextureAnimAsset_v1},
 	{"uimg", PakAssetScope_e::kClientOnly, Assets::AddUIImageAsset_v10, Assets::AddUIImageAsset_v10},
+	{"uiia", PakAssetScope_e::kClientOnly, nullptr, Assets::AddUIImageAtlasAsset_v2},
 	{"rlcd", PakAssetScope_e::kClientOnly, Assets::AddLcdScreenEffect_v0, Assets::AddLcdScreenEffect_v0},
-	{"matl", PakAssetScope_e::kClientOnly, Assets::AddMaterialAsset_v12, Assets::AddMaterialAsset_v15},
+	{"matl", PakAssetScope_e::kClientOnly, Assets::AddMaterialAsset_v12, Assets::AddMaterialAsset_v23},
 	{"mt4a", PakAssetScope_e::kClientOnly, nullptr, Assets::AddMaterialForAspectAsset_v3},
-	{"shdr", PakAssetScope_e::kClientOnly, Assets::AddShaderAsset_v8, Assets::AddShaderAsset_v12},
-	{"shds", PakAssetScope_e::kClientOnly, Assets::AddShaderSetAsset_v8, Assets::AddShaderSetAsset_v11},
+	{"shdr", PakAssetScope_e::kClientOnly, Assets::AddShaderAsset_v8, Assets::AddShaderAsset_v15},
+	{"shds", PakAssetScope_e::kClientOnly, Assets::AddShaderSetAsset_v8, Assets::AddShaderSetAsset_v12},
 	{"dtbl", PakAssetScope_e::kAll, Assets::AddDataTableAsset, Assets::AddDataTableAsset},
 	{"stlt", PakAssetScope_e::kAll, nullptr, Assets::AddSettingsLayout_v0},
 	{"stgs", PakAssetScope_e::kAll, nullptr, Assets::AddSettingsAsset_v1},
-	{"mdl_", PakAssetScope_e::kAll, nullptr, Assets::AddModelAsset_v9},
-	{"aseq", PakAssetScope_e::kAll, nullptr, Assets::AddAnimSeqAsset_v7},
-	{"arig", PakAssetScope_e::kAll, nullptr, Assets::AddAnimRigAsset_v4},
+	{"mdl_", PakAssetScope_e::kAll, nullptr, Assets::AddModelAsset_v17, Assets::AddModelAsset_v9},
+	{"aseq", PakAssetScope_e::kAll, nullptr, Assets::AddAnimSeqAsset_v11, Assets::AddAnimSeqAsset_v7},
+	{"arig", PakAssetScope_e::kAll, nullptr, Assets::AddAnimRigAsset_v6, Assets::AddAnimRigAsset_v4},
 	{"txls", PakAssetScope_e::kAll, nullptr, Assets::AddTextureListAsset_v1},
+	{"txtx", PakAssetScope_e::kAll, nullptr, Assets::AddTextureExtraAsset_v2},
+	{"rson", PakAssetScope_e::kAll, nullptr, Assets::AddRSONAsset_v1},
 	{"Ptch", PakAssetScope_e::kAll, Assets::AddPatchAsset, Assets::AddPatchAsset},
-	{"ui", PakAssetScope_e::kClientOnly, Assets::AddRuiAsset_v30, nullptr}
+	{"ui", PakAssetScope_e::kClientOnly, Assets::AddRuiAsset_v30, Assets::AddRuiAsset_v30},
+	{"font", PakAssetScope_e::kClientOnly, Assets::AddFontAtlasAsset_v7, Assets::AddFontAtlasAsset_v7},
+	{"wrap", PakAssetScope_e::kAll, nullptr, Assets::AddWrapAsset_v7},
+	{"rmap", PakAssetScope_e::kAll, nullptr, Assets::AddMapAsset_v4},
+	{"efct", PakAssetScope_e::kClientOnly, nullptr, Assets::AddEffectAsset_v16}
 };
 
 void CPakFileBuilder::AddJSONAsset(const PakAssetHandler_s& assetHandler, const char* const assetPath, const rapidjson::Value& file)
@@ -63,7 +71,11 @@ void CPakFileBuilder::AddJSONAsset(const PakAssetHandler_s& assetHandler, const 
 	}
 	case 8:
 	{
-		targetFunc = assetHandler.func_r5;
+		// S3 dedicated-server build: prefer the dedi (S3-version) writer when one
+		// is registered for this type, otherwise fall back to the S21-native writer.
+		targetFunc = (IsFlagSet(PF_DEDI) && assetHandler.func_r5_dedi)
+			? assetHandler.func_r5_dedi
+			: assetHandler.func_r5;
 		break;
 	}
 	}
@@ -361,6 +373,10 @@ void CPakFileBuilder::GenerateInternalDependencies()
 			if (dependency)
 			{
 				dependency->AddDependent(i);
+
+				// Check for overflow - internalDependencyCount is a short (max 32767)
+				if (it.internalDependencyCount >= SHRT_MAX)
+					Error("Asset \"%s\" has too many internal dependencies (max %hi).\n", it.name.c_str(), SHRT_MAX);
 				it.internalDependencyCount++;
 			}
 		}
@@ -424,23 +440,24 @@ PakPageLump_s CPakFileBuilder::CreatePageLump(const size_t size, const int flags
 	return m_pageBuilder.CreatePageLump(static_cast<int>(size), flags, alignment, buf);
 }
 
+void CPakFileBuilder::EnsurePageCapacity(const int flags, const int alignment, const int requiredSize)
+{
+	m_pageBuilder.EnsurePageCapacity(flags, alignment, requiredSize);
+}
+
 //-----------------------------------------------------------------------------
-// purpose: 
-// returns: 
+// purpose:
+// returns:
 //-----------------------------------------------------------------------------
 PakAsset_t* CPakFileBuilder::GetAssetByGuid(const PakGuid_t guid, size_t* const idx /*= nullptr*/, const bool silent /*= false*/)
 {
-	size_t i = 0;
-	for (PakAsset_t& it : m_assets)
+	const auto it = m_assetGuidMap.find(guid);
+	if (it != m_assetGuidMap.end())
 	{
-		if (it.guid == guid)
-		{
-			if (idx)
-				*idx = i;
-
-			return &it;
-		}
-		i++;
+		const size_t index = it->second;
+		if (idx)
+			*idx = index;
+		return &m_assets[index];
 	}
 	if (!silent)
 		Debug("Failed to find asset with guid %llX.\n", guid);
@@ -531,6 +548,7 @@ static bool Pak_StreamToStreamEncode(BinaryIO& inStream, BinaryIO& outStream, co
 	outStream.SeekPut(headerSize);
 
 	size_t bytesLeft = decodedFrameSize;
+	size_t totalBytesRead = 0;
 
 	while (bytesLeft)
 	{
@@ -539,6 +557,10 @@ static bool Pak_StreamToStreamEncode(BinaryIO& inStream, BinaryIO& outStream, co
 
 		inStream.Read(reinterpret_cast<uint8_t*>(buffIn), numBytesToRead);
 		bytesLeft -= numBytesToRead;
+		totalBytesRead += numBytesToRead;
+
+		// Update progress for compression
+		Utils::ProgressPrint(totalBytesRead, decodedFrameSize, "Compressing: ");
 
 		ZSTD_EndDirective const mode = lastChunk ? ZSTD_e_end : ZSTD_e_continue;
 		ZSTD_inBuffer inputFrame = { buffIn, numBytesToRead, 0 };
@@ -562,6 +584,7 @@ static bool Pak_StreamToStreamEncode(BinaryIO& inStream, BinaryIO& outStream, co
 		} while (!finished);
 	}
 
+	Utils::ProgressComplete();
 	return true;
 }
 
@@ -614,6 +637,7 @@ static bool Pak_StreamToStreamDecode(BinaryIO& inStream, BinaryIO& outStream, co
 	outStream.SeekPut(headerSize);
 
 	size_t bytesLeft = encodedFrameSize;
+	size_t totalBytesRead = 0;
 	size_t lastRet = 0;
 
 	while (bytesLeft)
@@ -623,6 +647,10 @@ static bool Pak_StreamToStreamDecode(BinaryIO& inStream, BinaryIO& outStream, co
 
 		inStream.Read(reinterpret_cast<uint8_t*>(buffIn), numBytesToRead);
 		bytesLeft -= numBytesToRead;
+		totalBytesRead += numBytesToRead;
+
+		// Update progress for decompression
+		Utils::ProgressPrint(totalBytesRead, encodedFrameSize, "Decompressing: ");
 
 		ZSTD_inBuffer inputFrame = { buffIn, numBytesToRead, 0 };
 
@@ -649,6 +677,7 @@ static bool Pak_StreamToStreamDecode(BinaryIO& inStream, BinaryIO& outStream, co
 		return false;
 	}
 
+	Utils::ProgressComplete();
 	return true;
 }
 
@@ -745,6 +774,266 @@ size_t Pak_DecodeStreamAndSwap(BinaryIO& io, const uint16_t pakVersion, const ch
 }
 
 //-----------------------------------------------------------------------------
+// Purpose: one-shot oodle (kraken) encode of the post-header region, matching
+// the raw OodleLZ stream format the apex/s21 runtime decodes. returns the size
+// of the compressed region only (excluding the header), which is what the
+// runtime stores in PakHdr_t::compressedSize for oodle-encoded paks.
+//-----------------------------------------------------------------------------
+size_t Pak_OodleEncodeStreamAndSwap(BinaryIO& io, const int compressLevel, const int backwardCompatMajor, const uint16_t pakVersion, const char* const pakPath)
+{
+	Log("*** encoding pak file \"%s\" with Oodle (Kraken) compress level %i (bwCompat=%i).\n", pakPath, compressLevel, backwardCompatMajor);
+	const steady_clock::time_point start = high_resolution_clock::now();
+
+	const size_t headerSize = Pak_GetHeaderSize(pakVersion);
+	const size_t totalSize = static_cast<size_t>(io.GetSize());
+
+	if (totalSize <= headerSize)
+	{
+		Warning("%s: pak file contains no data to be compressed.\n", __FUNCTION__);
+		return 0;
+	}
+
+	const size_t rawRegion = totalSize - headerSize;
+
+	std::unique_ptr<uint8_t[]> rawBuf(new uint8_t[rawRegion]);
+	io.SeekGet(static_cast<std::streamoff>(headerSize));
+	io.Read(rawBuf.get(), rawRegion);
+
+	const size_t bound = Oodle::GetCompressedBufferSizeNeeded(rawRegion);
+	std::unique_ptr<uint8_t[]> cmpBuf(new uint8_t[bound]);
+
+	const size_t cmpLen = Oodle::Compress(rawBuf.get(), rawRegion, cmpBuf.get(), compressLevel, backwardCompatMajor);
+
+	if (!cmpLen)
+	{
+		Error("Oodle compression failed for pak file \"%s\".\n", pakPath);
+		return 0;
+	}
+
+	BinaryIO outCompressed;
+	std::string outCompressedPath = pakPath;
+	outCompressedPath.append("_encoded");
+
+	if (!outCompressed.Open(outCompressedPath, BinaryIO::Mode_e::Write))
+	{
+		Warning("Failed to open output pak file \"%s\" for compression.\n", outCompressedPath.c_str());
+		return 0;
+	}
+
+	// the header gap is overwritten by the caller with the updated header.
+	outCompressed.SeekPut(static_cast<std::streamoff>(headerSize));
+	outCompressed.Write(cmpBuf.get(), cmpLen);
+
+	if (!Util_ReplaceStream(io, outCompressed, pakPath, outCompressedPath.c_str()))
+		return 0;
+
+	const steady_clock::time_point stop = high_resolution_clock::now();
+	const microseconds duration = duration_cast<microseconds>(stop - start);
+
+	Log("*** finished pak file encoding; took %lld ms (%zu bytes -- %.1f%% ratio).\n",
+		duration.count(), cmpLen, 100.0 * (rawRegion - cmpLen) / rawRegion);
+
+	return cmpLen;
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: one-shot oodle decode counterpart of Pak_OodleEncodeStreamAndSwap.
+// rawRegionSize is the decompressed post-header size (decompressedSize - headerSize).
+//-----------------------------------------------------------------------------
+size_t Pak_OodleDecodeStreamAndSwap(BinaryIO& io, const uint16_t pakVersion, const char* const pakPath, const size_t rawRegionSize)
+{
+	Log("*** decoding pak file \"%s\" using Oodle.\n", pakPath);
+	const steady_clock::time_point start = high_resolution_clock::now();
+
+	const size_t headerSize = Pak_GetHeaderSize(pakVersion);
+	const size_t totalSize = static_cast<size_t>(io.GetSize());
+
+	if (totalSize <= headerSize)
+	{
+		Warning("%s: pak file contains no data to be decompressed.\n", __FUNCTION__);
+		return 0;
+	}
+
+	const size_t compRegion = totalSize - headerSize;
+
+	std::unique_ptr<uint8_t[]> cmpBuf(new uint8_t[compRegion]);
+	io.SeekGet(static_cast<std::streamoff>(headerSize));
+	io.Read(cmpBuf.get(), compRegion);
+
+	std::unique_ptr<uint8_t[]> rawBuf(new uint8_t[rawRegionSize]);
+
+	if (!Oodle::Decompress(cmpBuf.get(), compRegion, rawBuf.get(), rawRegionSize))
+	{
+		Error("Oodle decompression failed for pak file \"%s\".\n", pakPath);
+		return 0;
+	}
+
+	BinaryIO outDecompressed;
+	std::string outDecompressedPath = pakPath;
+	outDecompressedPath.append("_decoded");
+
+	if (!outDecompressed.Open(outDecompressedPath, BinaryIO::Mode_e::Write))
+	{
+		Warning("Failed to open output pak file \"%s\" for decompression.\n", outDecompressedPath.c_str());
+		return 0;
+	}
+
+	outDecompressed.SeekPut(static_cast<std::streamoff>(headerSize));
+	outDecompressed.Write(rawBuf.get(), rawRegionSize);
+
+	if (!Util_ReplaceStream(io, outDecompressed, pakPath, outDecompressedPath.c_str()))
+		return 0;
+
+	const steady_clock::time_point stop = high_resolution_clock::now();
+	const microseconds duration = duration_cast<microseconds>(stop - start);
+
+	Log("*** finished pak file decoding; took %lld ms (%zu bytes).\n",
+		duration.count(), headerSize + rawRegionSize);
+
+	return headerSize + rawRegionSize;
+}
+
+static void SplitPakPathBlob(const char* const buf, const size_t len, std::vector<std::string>& out)
+{
+	size_t i = 0;
+	while (i < len)
+	{
+		const char* const s = buf + i;
+		const size_t n = strnlen(s, len - i);
+		if (n)
+			out.emplace_back(s, n);
+		i += n + 1;
+	}
+}
+
+static void UnpackStreamOff(const int64_t packed, int64_t& off, int64_t& idx)
+{
+	if (packed < 0)
+	{
+		off = -1;
+		idx = -1;
+		return;
+	}
+
+	idx = packed & 0xFFF;
+	off = packed & ~0xFFFLL;
+	if (off == 0 && idx == 0)
+	{
+		off = -1;
+		idx = -1;
+	}
+}
+
+void CPakFileBuilder::LoadStreamReuseMap()
+{
+	m_streamReuse.clear();
+	m_reuseMandPaths.clear();
+	m_reuseOptPaths.clear();
+	m_streamReuseHits = 0;
+
+	std::string path = m_pakFilePath;
+	BinaryIO in;
+	if (!in.Open(path.c_str(), BinaryIO::Mode_e::Read) || in.GetSize() < PAK_HEADER_SIZE_V8)
+	{
+		in.Close();
+		path = m_pakFilePath + ".pre_cbremap";
+		if (!in.Open(path.c_str(), BinaryIO::Mode_e::Read) || in.GetSize() < PAK_HEADER_SIZE_V8)
+			return;
+	}
+
+	unsigned int magic = 0;
+	uint16_t version = 0;
+	in.Read(magic);
+	in.Read(version);
+	if (magic != 0x6b615052 || version != 8)
+		return;
+
+	in.SeekGet(0x48);
+	const uint16_t sp = in.Read<uint16_t>();
+	const uint16_t opt = in.Read<uint16_t>();
+	const uint16_t slabs = in.Read<uint16_t>();
+	const uint16_t pc = in.Read<uint16_t>();
+	in.SeekGet(0x54);
+	const uint32_t ptrc = in.Read<uint32_t>();
+	const uint32_t ac = in.Read<uint32_t>();
+	if (ac == 0 || ac > 200000)
+		return;
+
+	const size_t pagesOff = (size_t)PAK_HEADER_SIZE_V8 + sp + opt + (size_t)slabs * 16;
+	const size_t descOff = pagesOff + (size_t)pc * 12;
+	const size_t assetsOff = descOff + (size_t)ptrc * 8;
+	if (assetsOff + (size_t)ac * 80 > (size_t)in.GetSize())
+		return;
+
+	if (sp)
+	{
+		std::vector<char> blob(sp);
+		in.SeekGet(PAK_HEADER_SIZE_V8);
+		in.Read(blob.data(), sp);
+		SplitPakPathBlob(blob.data(), sp, m_reuseMandPaths);
+	}
+	if (opt)
+	{
+		std::vector<char> blob(opt);
+		in.SeekGet(PAK_HEADER_SIZE_V8 + sp);
+		in.Read(blob.data(), opt);
+		SplitPakPathBlob(blob.data(), opt, m_reuseOptPaths);
+	}
+
+	in.SeekGet(static_cast<std::streamoff>(assetsOff));
+	for (uint32_t i = 0; i < ac; i++)
+	{
+		const PakGuid_t guid = in.Read<PakGuid_t>();
+		in.SeekGet(8 + 16, std::ios::cur); // unk0 + two PagePtr_t
+		const int64_t packedMand = in.Read<int64_t>();
+		const int64_t packedOpt = in.Read<int64_t>();
+		in.SeekGet(80 - 8 - 8 - 16 - 8 - 8, std::ios::cur); // rest of 80B entry
+
+		StreamReuse_s e;
+		UnpackStreamOff(packedMand, e.mandOff, e.mandIdx);
+		UnpackStreamOff(packedOpt, e.optOff, e.optIdx);
+		if (e.mandOff < 0 && e.optOff < 0)
+			continue;
+		m_streamReuse[guid] = e;
+	}
+
+	Log("Loaded %zu stream-reuse entries from \"%s\" (%zu mand paths, %zu opt paths).\n",
+		m_streamReuse.size(), path.c_str(), m_reuseMandPaths.size(), m_reuseOptPaths.size());
+}
+
+bool CPakFileBuilder::TryReuseStreaming(const PakGuid_t guid, PakStreamSetEntry_s* const mand, PakStreamSetEntry_s* const opt)
+{
+	const auto it = m_streamReuse.find(guid);
+	if (it == m_streamReuse.end())
+		return false;
+
+	const StreamReuse_s& e = it->second;
+	bool used = false;
+
+	if (mand && e.mandOff >= 0)
+	{
+		if (e.mandIdx < 0 || static_cast<size_t>(e.mandIdx) >= m_reuseMandPaths.size())
+			return false;
+		mand->streamOffset = e.mandOff;
+		mand->streamIndex = AddStreamingFileReference(m_reuseMandPaths[static_cast<size_t>(e.mandIdx)].c_str(), true);
+		used = true;
+	}
+
+	if (opt && e.optOff >= 0)
+	{
+		if (e.optIdx < 0 || static_cast<size_t>(e.optIdx) >= m_reuseOptPaths.size())
+			return false;
+		opt->streamOffset = e.optOff;
+		opt->streamIndex = AddStreamingFileReference(m_reuseOptPaths[static_cast<size_t>(e.optIdx)].c_str(), false);
+		used = true;
+	}
+
+	if (used)
+		m_streamReuseHits++;
+	return used;
+}
+
+//-----------------------------------------------------------------------------
 // purpose: builds rpak and starpak from input map file
 //-----------------------------------------------------------------------------
 void CPakFileBuilder::BuildFromMap(const js::Document& doc)
@@ -756,6 +1045,13 @@ void CPakFileBuilder::BuildFromMap(const js::Document& doc)
 	Utils::ResolvePath(m_assetPath, m_buildSettings->GetBuildMapPath());
 
 	this->SetVersion(static_cast<uint16_t>(m_buildSettings->GetPakVersion()));
+
+	// base pak-header flags. The S21 native loader requires bit 0x20 (and the
+	// shipping client paks set 0x2C on perm / 0x24 on temp); without it the pak is
+	// rejected ("pak load failed"). Compression flags are OR'd in later by the
+	// '-compress' step, so this is just the base.
+	m_Header.flags = static_cast<uint16_t>(JSON_GetValueOrDefault(doc, "headerFlags", 0));
+
 	const char* const pakName = JSON_GetValueOrDefault(doc, "name", DEFAULT_RPAK_NAME);
 
 	// print parsed settings
@@ -766,6 +1062,7 @@ void CPakFileBuilder::BuildFromMap(const js::Document& doc)
 
 	// set build path
 	SetPath(std::string(m_buildSettings->GetOutputPath()) + pakName + ".rpak");
+	LoadStreamReuseMap();
 
 	// create file stream from path created above
 	BinaryIO out;
@@ -774,13 +1071,6 @@ void CPakFileBuilder::BuildFromMap(const js::Document& doc)
 
 	Log("*** building pak file \"%s\".\n", m_pakFilePath.c_str());
 
-	// If this is set and we have "example.rpak", the runtime will load the
-	// library `example.dll` during the load of `example.rpak`, from the same
-	// directory the pak is being loaded from. The loading of the library
-	// happens before the individual assets are being loaded and parsed.
-	if (JSON_GetValueOrDefault(doc, "hasDynamicLibrary", false))
-		m_Header.flags |= PAK_HEADER_FLAGS_HAS_MODULE;
-
 	// Skip the header data at first so we can come back and fill it in when we have all of the info
 	out.Pad(GetVersion() >= 8 ? PAK_HEADER_SIZE_V8 : PAK_HEADER_SIZE_V6);
 
@@ -788,8 +1078,39 @@ void CPakFileBuilder::BuildFromMap(const js::Document& doc)
 
 	if (JSON_GetIterator(doc, "files", JSONFieldType_e::kArray, filesIt))
 	{
-		for (const auto& file : filesIt->value.GetArray())
+		const auto& filesArray = filesIt->value.GetArray();
+		const size_t totalFiles = filesArray.Size();
+
+		// First pass: collect all asset GUIDs so we can validate references
+		for (const auto& file : filesArray)
+		{
+			const char* const assetPath = JSON_GetValueOrDefault(file, "_path", static_cast<const char*>(nullptr));
+			if (assetPath)
+			{
+				const PakGuid_t assetGuid = Pak_GetGuidOverridable(file, assetPath);
+				m_knownAssetGuids.insert(assetGuid);
+			}
+		}
+
+		// Second pass: actually process the assets
+		size_t currentFile = 0;
+		int lastProgressPercent = -1;
+
+		for (const auto& file : filesArray)
+		{
+			currentFile++;
+
+			// Throttle progress printing - only print when percentage changes
+			const int currentProgressPercent = (int)((float)currentFile / totalFiles * 100);
+			if (currentProgressPercent != lastProgressPercent)
+			{
+				Utils::ProgressPrint(currentFile, totalFiles, "Building assets: ");
+				lastProgressPercent = currentProgressPercent;
+			}
+
 			AddAsset(file);
+		}
+		Utils::ProgressComplete();
 	}
 
 	{
@@ -851,16 +1172,42 @@ void CPakFileBuilder::BuildFromMap(const js::Document& doc)
 	this->SetCompressedSize(compressedFileSize == 0 ? decompressedFileSize : compressedFileSize);
 	this->SetDecompressedSize(decompressedFileSize);
 
-	// set header descriptors
-	this->SetFileTime(Utils::GetSystemFileTime());
+	FILETIME headerFileTime = Utils::GetSystemFileTime();
+	rapidjson::Value::ConstMemberIterator buildDateIt;
+	if (JSON_GetIterator(doc, "buildDate", buildDateIt))
+	{
+		const rapidjson::Value& buildDate = buildDateIt->value;
+		bool parsedBuildDate = false;
 
+		if (buildDate.IsString())
+			parsedBuildDate = Utils::TryParseIso8601UtcToFileTime(buildDate.GetString(), buildDate.GetStringLength(), headerFileTime);
+		else if (buildDate.IsInt64())
+			parsedBuildDate = Utils::TryParseUnixTimestampToFileTime(buildDate.GetInt64(), headerFileTime);
+		else if (buildDate.IsUint64())
+			parsedBuildDate = Utils::TryParseUnixTimestampToFileTime(buildDate.GetUint64(), headerFileTime);
+		else
+			Error("\"buildDate\" must be a string or integer value.\n");
+
+		if (!parsedBuildDate)
+			Error("Failed to parse \"buildDate\". Use ISO 8601 UTC (e.g. \"2025-11-26T15:04:05Z\") or Unix epoch seconds (>= 0).\n");
+	}
+
+	// set header descriptors
+	SetFileTime(headerFileTime);
+
+	// If this is set and we have "example.rpak", the runtime will load the
+	// library `example.dll` during the load of `example.rpak`, from the same
+	// directory the pak is being loaded from. The loading of the library
+	// happens before the individual assets are being loaded and parsed.
+	if (JSON_GetValueOrDefault(doc, "hasDynamicLibrary", false))
+		m_Header.flags |= PAK_HEADER_FLAGS_HAS_MODULE;
 
 	// Go back to the start of the file since now we can write the header successfully
 	out.SeekPut(0);
 
 	this->WriteHeader(out);
 
-	Log("*** built pak file \"%s\" with %zu assets, totaling %zd bytes.\n",
-		m_pakFilePath.c_str(), GetAssetCount(), out.GetSize());
+	Log("*** built pak file \"%s\" with %zu assets, totaling %zd bytes (stream-reuse hits %zu).\n",
+		m_pakFilePath.c_str(), GetAssetCount(), out.GetSize(), m_streamReuseHits);
 	out.Close();
 }

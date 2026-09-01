@@ -3,6 +3,8 @@
 #include "pakpage.h"
 #include "buildsettings.h"
 #include "streamfile.h"
+#include <unordered_set>
+#include <unordered_map>
 
 struct PakStreamSetEntry_s
 {
@@ -37,6 +39,7 @@ struct PakAssetHandler_s
 	PakAssetScope_e assetScope;
 	PakAssetAddFunc_t func_r2;
 	PakAssetAddFunc_t func_r5;
+	PakAssetAddFunc_t func_r5_dedi; // optional: S3 dedicated-server writer (pak v8), selected when PF_DEDI is set; null = fall back to func_r5
 };
 
 struct PakAssetHasher_s
@@ -67,6 +70,7 @@ public:
 	int64_t AddStreamingFileReference(const char* const path, const bool mandatory);
 
 	PakStreamSetEntry_s AddStreamingDataEntry(const int64_t size, const uint8_t* const data, const PakStreamSet_e set);
+	bool TryReuseStreaming(const PakGuid_t guid, PakStreamSetEntry_s* const mand, PakStreamSetEntry_s* const opt);
 
 	//----------------------------------------------------------------------------
 	// inlines
@@ -78,8 +82,6 @@ public:
 
 	inline uint16_t GetVersion() const { return m_Header.fileVersion; }
 	void SetVersion(const uint16_t version);
-
-	inline const PakHdr_t& GetHeader() const { return m_Header; };
 
 	inline size_t GetMaxStreamingFileHandlesPerSet() const
 	{
@@ -125,7 +127,9 @@ public:
 	void GenerateAssetUses();
 
 	PakPageLump_s CreatePageLump(const size_t size, const int flags, const int alignment, void* const buf = nullptr);
+	void EnsurePageCapacity(const int flags, const int alignment, const int requiredSize);
 	PakAsset_t* GetAssetByGuid(const PakGuid_t guid, size_t* const idx = nullptr, const bool silent = false);
+	bool IsKnownAssetGuid(const PakGuid_t guid) const { return m_knownAssetGuids.contains(guid) || m_buildSettings->IsGlobalKnownAsset(guid); }
 
 	FORCEINLINE PakAsset_t& BeginAsset(const PakGuid_t assetGuid, const char* const assetPath)
 	{
@@ -152,10 +156,18 @@ public:
 		}
 
 		m_processingAsset = true;
+
+		// Advance the page builder's asset epoch so append-only header pages stay
+		// contiguous per asset run (see CPakPageBuilder::BeginAssetEpoch).
+		m_pageBuilder.BeginAssetEpoch();
+
 		PakAsset_t& asset = m_assets.emplace_back();
 
 		asset.guid = assetGuid;
 		asset.name = assetPath;
+
+		// Add to hash map for O(1) lookups
+		m_assetGuidMap[assetGuid] = m_assets.size() - 1;
 
 		return asset;
 	}
@@ -171,6 +183,20 @@ public:
 	void BuildFromMap(const js::Document& doc);
 
 private:
+	void LoadStreamReuseMap();
+
+	struct StreamReuse_s
+	{
+		int64_t mandOff = -1;
+		int64_t mandIdx = -1;
+		int64_t optOff = -1;
+		int64_t optIdx = -1;
+	};
+
+	std::unordered_map<PakGuid_t, StreamReuse_s> m_streamReuse;
+	std::vector<std::string> m_reuseMandPaths;
+	std::vector<std::string> m_reuseOptPaths;
+	size_t m_streamReuseHits = 0;
 	const CBuildSettings* m_buildSettings;
 	CStreamFileBuilder* m_streamBuilder;
 
@@ -182,6 +208,8 @@ private:
 	std::string m_assetPath;
 
 	std::vector<PakAsset_t> m_assets;
+	std::unordered_map<PakGuid_t, size_t> m_assetGuidMap; // GUID -> index in m_assets
+	std::unordered_set<PakGuid_t> m_knownAssetGuids;
 	std::vector<PagePtr_t> m_pagePointers;
 
 	CPakPageBuilder m_pageBuilder;
@@ -244,3 +272,6 @@ inline const char* Pak_EncodeAlgorithmToString(const uint16_t flags)
 
 extern size_t Pak_EncodeStreamAndSwap(BinaryIO& io, const int compressLevel, const int workerCount, const uint16_t pakVersion, const char* const pakPath);
 extern size_t Pak_DecodeStreamAndSwap(BinaryIO& io, const uint16_t pakVersion, const char* const pakPath);
+
+extern size_t Pak_OodleEncodeStreamAndSwap(BinaryIO& io, const int compressLevel, const int backwardCompatMajor, const uint16_t pakVersion, const char* const pakPath);
+extern size_t Pak_OodleDecodeStreamAndSwap(BinaryIO& io, const uint16_t pakVersion, const char* const pakPath, const size_t rawRegionSize);

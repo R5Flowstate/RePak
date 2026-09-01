@@ -429,14 +429,41 @@ static void SettingsAsset_WriteStringValue(const char* const string, const size_
 }
 
 static void SettingsAsset_WriteAssetValue(const char* const string, const size_t stringLen, const size_t valueOffset,
-    PakAsset_t& asset, CPakFileBuilder* const pak, PakPageLump_s& dataLump, SettingsAssetMemory_s& settingsMemory)
+    PakAsset_t& asset, CPakFileBuilder* const pak, PakPageLump_s& dataLump, SettingsAssetMemory_s& settingsMemory, const char* fieldName)
 {
     const PakGuid_t assetGuid = RTech::StringToGuid(string);
     *(PakGuid_t*)reinterpret_cast<char*>(&dataLump.data[settingsMemory.curGuidBufIndex]) = assetGuid;
 
+    // Check if the referenced asset exists in the current pak or json (skip null/empty references)
+    if (assetGuid != 0)
+    {
+        // Check if already added to pak
+        const bool inPak = pak->GetAssetByGuid(assetGuid, nullptr, true) != nullptr;
+
+        // If not in pak, check if it's in the build list (will be processed later)
+        const bool inBuildList = pak->IsKnownAssetGuid(assetGuid);
+
+        // Settings legitimately reference base-build assets (e.g. lgnd_skins ->
+        // mdl/humans/.../pilot_medium_*.rmdl) that live in the shipped game paks,
+        // not in this SDK build. The guid is still written and registered as a ref
+        // (below), so it resolves at runtime against the co-loaded base build.
+        // Warn (loud) rather than hard-error so a real typo is still visible while
+        // a legitimate external reference does not break a multi-pak build.
+        if (!inPak && !inBuildList)
+            Warning("Settings asset '%s' field '%s' (type: asset) references external asset '%s' (0x%llX) not in this build; assuming it resolves at runtime against the base build.\n", asset.name.c_str(), fieldName, string, assetGuid);
+    }
+
     Pak_RegisterGuidRefAtOffset(assetGuid, settingsMemory.curGuidBufIndex, dataLump, asset);
     settingsMemory.curGuidBufIndex += sizeof(PakGuid_t);
 
+    SettingsAsset_WriteStringValue(string, stringLen, valueOffset, pak, dataLump, settingsMemory);
+}
+
+static void SettingsAsset_WriteAssetValueNoPrecache(const char* const string, const size_t stringLen, const size_t valueOffset,
+    PakAsset_t& asset, CPakFileBuilder* const pak, PakPageLump_s& dataLump, SettingsAssetMemory_s& settingsMemory)
+{
+    // For asset_noprecache, skip all validation and just write the string value
+    // We don't register the GUID as a dependency either
     SettingsAsset_WriteStringValue(string, stringLen, valueOffset, pak, dataLump, settingsMemory);
 }
 
@@ -500,11 +527,13 @@ static void SettingsAsset_WriteValues(const SettingsLayoutAsset_s& layoutAsset, 
             SettingsAsset_WriteVectorValue(it.value.GetString(), fieldName.c_str(), targetOffset, false, dataLump);
             break;
         case SettingsFieldType_e::ST_Asset:
-            SettingsAsset_WriteAssetValue(it.value.GetString(), it.value.GetStringLength(), targetOffset, asset, pak, dataLump, settingsMemory);
+            SettingsAsset_WriteAssetValue(it.value.GetString(), it.value.GetStringLength(), targetOffset, asset, pak, dataLump, settingsMemory, fieldName.c_str());
             break;
         case SettingsFieldType_e::ST_String:
-        case SettingsFieldType_e::ST_AssetNoPrecache:
             SettingsAsset_WriteStringValue(it.value.GetString(), it.value.GetStringLength(), targetOffset, pak, dataLump, settingsMemory);
+            break;
+        case SettingsFieldType_e::ST_AssetNoPrecache:
+            SettingsAsset_WriteAssetValueNoPrecache(it.value.GetString(), it.value.GetStringLength(), targetOffset, asset, pak, dataLump, settingsMemory);
             break;
         case SettingsFieldType_e::ST_StaticArray:
         {

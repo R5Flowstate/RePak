@@ -337,3 +337,7 @@ ASALocalRun/
 # Generated Assets (we really don't want these to end up on git)
 *.rpak
 *.starpak
+# Oodle is supplied by the builder, never committed
+src/thirdparty/oodle/*.lib
+src/thirdparty/oodle/oodle2.h
+src/thirdparty/oodle/oodle2base.h

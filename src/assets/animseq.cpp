@@ -156,7 +156,7 @@ static void AnimSeq_InternalAddAnimSeq(CPakFileBuilder* const pak, const PakGuid
     AnimSeqAssetHeader_t* const hdr = reinterpret_cast<AnimSeqAssetHeader_t*>(hdrLump.data);
 
     const size_t rseqFileSize = rseqInput.GetSize();
-    uint8_t* const tempAseqBuf = new uint8_t[rseqFileSize];
+    uint8_t* const tempAseqBuf = static_cast<uint8_t*>(GetGlobalScratch().Allocate(rseqFileSize));
 
     // write the rseq data into the data buffer
     rseqInput.Read(tempAseqBuf, rseqFileSize);
@@ -169,6 +169,23 @@ static void AnimSeq_InternalAddAnimSeq(CPakFileBuilder* const pak, const PakGuid
 
     AnimSeq_ParseDependenciesFromData(tempAseqBuf, dependencies);
     AnimSeq_ParseDependenciesFromMap(pak, assetPath, dependencies);
+
+    // Validate that all referenced assets exist in the pak or build list
+    for (size_t i = 0; i < ASEQ_DEP_COUNT; i++)
+    {
+        for (const PakGuid_t depGuid : dependencies[i])
+        {
+            // Check if already added to pak
+            bool found = pak->GetAssetByGuid(depGuid, nullptr, true) != nullptr;
+
+            // If not found in pak, check if it's in the build list
+            if (!found)
+                found = pak->IsKnownAssetGuid(depGuid);
+
+            //if (!found)
+              //  Error("Animseq asset '%s' references asset (0x%llX) which is not included in the current pak or json.\n", assetPath, depGuid);
+        }
+    }
 
     const size_t numDependencies = dependencies[ASEQ_DEP_GENERIC].size() + dependencies[ASEQ_DEP_MODEL].size() + dependencies[ASEQ_DEP_SETTINGS].size();
 
@@ -219,7 +236,8 @@ static void AnimSeq_InternalAddAnimSeq(CPakFileBuilder* const pak, const PakGuid
     memcpy(dataLump.data + nameOffset, assetPath, rseqNameBufLen);
     memcpy(dataLump.data + dataOffset, tempAseqBuf, rseqFileSize);
 
-    delete[] tempAseqBuf; // No longer needed.
+    // tempAseqBuf uses scratch allocator, no need to free
+    // It will be reused for the next asset
 
     const mstudioseqdesc_t& seqdesc = *reinterpret_cast<mstudioseqdesc_t*>(dataLump.data + dataOffset);
 
@@ -247,6 +265,157 @@ static void AnimSeq_InternalAddAnimSeq(CPakFileBuilder* const pak, const PakGuid
     asset.SetHeaderPointer(hdrLump.data);
 
     pak->FinishAsset();
+}
+
+// v11 .rseq blobs use the v16 "compressed" seqdesc (uint16 packed offsets), NOT the
+// v7 mstudioseqdesc_t. Walk events through that layout to discover embedded '@'
+// dependencies. Reading this with the v7 struct lands numevents/eventindex on the
+// wrong fields and walks garbage -> AV, so this MUST stay v16-specific.
+static void AnimSeq_ParseDependenciesFromData_v16(const uint8_t* const data, std::set<PakGuid_t>(&dependencies)[ASEQ_DEP_COUNT])
+{
+    const mstudioseqdesc_v16_t& seqdesc = *reinterpret_cast<const mstudioseqdesc_v16_t*>(data);
+
+    for (int i = 0; i < seqdesc.numevents; i++)
+    {
+        const mstudioevent_v16_t* const event = seqdesc.pEvent(i);
+        const char* const options = seqdesc.pEventOptions(event);
+
+        const char* const depStart = strchr(options, '@');
+
+        if (!depStart || *(depStart + 1) == '\0')
+            continue; // '@' not found or nothing after '@'.
+
+        const char* start = strchr(depStart + 1, ' ');
+
+        if (!start || *(start + 1) == '\0')
+            continue; // Start of asset name not found or empty.
+
+        start++; // advance over the ' ' to the asset name.
+
+        const char* end = strchr(start, ' ');
+        if (!end)
+            end = options + strlen(options);
+
+        const size_t nameLen = (end - start);
+
+        if (nameLen < ASEQ_DEPENDENCY_MIN_STR_LEN)
+        {
+            Warning("Embedded animation sequence dependency #%i has a name that is too short! [%zu < %zu]\n",
+                i, nameLen, (size_t)ASEQ_DEPENDENCY_MIN_STR_LEN);
+            continue;
+        }
+
+        char stack[256];
+        memcpy(stack, start, nameLen);
+        stack[nameLen] = '\0';
+        AnimSeq_ClassifyAndAddDependency(stack, dependencies);
+    }
+}
+
+// S21-native v11 (64-byte AnimSeqAssetHeader_v11_t). Same .rseq input as v7, but the
+// blob is a v16 seqdesc (dep + autolayer parsing go through mstudioseqdesc_v16_t), and
+// the header grew (dep pointers at +0x20/0x28/0x30, u16 counts, an effectAssets pointer
+// + runtime fields). Verified byte-exact against the shipping district paks for the dep-less seqs.
+static void AnimSeq_InternalAddAnimSeq_v11(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath)
+{
+    PakAsset_t& asset = pak->BeginAsset(assetGuid, assetPath);
+    const std::string rseqFilePath = pak->GetAssetPath() + assetPath;
+
+    BinaryIO rseqInput;
+    if (!rseqInput.Open(rseqFilePath, BinaryIO::Mode_e::Read))
+    {
+        Error("Failed to open animseq asset \"%s\".\n", assetPath);
+        return;
+    }
+
+    PakPageLump_s hdrLump = pak->CreatePageLump(sizeof(AnimSeqAssetHeader_v11_t), SF_HEAD, 8);
+    AnimSeqAssetHeader_v11_t* const hdr = reinterpret_cast<AnimSeqAssetHeader_v11_t*>(hdrLump.data);
+
+    const size_t rseqFileSize = rseqInput.GetSize();
+    uint8_t* const tempAseqBuf = static_cast<uint8_t*>(GetGlobalScratch().Allocate(rseqFileSize));
+    rseqInput.Read(tempAseqBuf, rseqFileSize);
+    rseqInput.Close();
+
+    std::set<PakGuid_t> dependencies[ASEQ_DEP_COUNT];
+    AnimSeq_ParseDependenciesFromData_v16(tempAseqBuf, dependencies);
+    AnimSeq_ParseDependenciesFromMap(pak, assetPath, dependencies);
+
+    const size_t numDependencies = dependencies[ASEQ_DEP_GENERIC].size() + dependencies[ASEQ_DEP_MODEL].size() + dependencies[ASEQ_DEP_SETTINGS].size();
+    const size_t dependenciesBufSize = numDependencies * sizeof(PakGuid_t);
+    const size_t rseqNameBufLen = strlen(assetPath) + 1;
+
+    PakPageLump_s dataLump = pak->CreatePageLump((dependenciesBufSize + rseqNameBufLen + rseqFileSize), SF_CPU, numDependencies > 0 ? 8 : 1);
+    asset.ExpandGuidBuf(numDependencies);
+
+    size_t bufferBase = 0;
+    for (size_t i = 0; i < ASEQ_DEP_COUNT; i++)
+    {
+        const std::set<PakGuid_t>& set = dependencies[i];
+        if (set.empty())
+            continue;
+
+        if (i == ASEQ_DEP_MODEL)
+        {
+            pak->AddPointer(hdrLump, offsetof(AnimSeqAssetHeader_v11_t, pModels), dataLump, bufferBase);
+            hdr->numModels = (uint16_t)set.size();
+        }
+        else if (i == ASEQ_DEP_SETTINGS)
+        {
+            pak->AddPointer(hdrLump, offsetof(AnimSeqAssetHeader_v11_t, pSettings), dataLump, bufferBase);
+            hdr->numAnimWindows = (uint16_t)set.size();
+        }
+        else // ASEQ_DEP_GENERIC -> effectAssets in v11 (efct/aseq); no count field.
+        {
+            pak->AddPointer(hdrLump, offsetof(AnimSeqAssetHeader_v11_t, pEffects), dataLump, bufferBase);
+        }
+
+        for (size_t j = 0; j < set.size(); j++)
+        {
+            std::set<PakGuid_t>::iterator it = set.begin();
+            std::advance(it, j);
+
+            const PakGuid_t guidToCopy = *it;
+            reinterpret_cast<PakGuid_t*>(&dataLump.data[bufferBase])[j] = guidToCopy;
+            Pak_RegisterGuidRefAtOffset(guidToCopy, bufferBase + (j * sizeof(PakGuid_t)), dataLump, asset);
+        }
+
+        bufferBase += set.size() * sizeof(PakGuid_t);
+    }
+
+    const size_t nameOffset = dependenciesBufSize;
+    const size_t dataOffset = dependenciesBufSize + rseqNameBufLen;
+
+    memcpy(dataLump.data + nameOffset, assetPath, rseqNameBufLen);
+    memcpy(dataLump.data + dataOffset, tempAseqBuf, rseqFileSize);
+
+    const mstudioseqdesc_v16_t& seqdesc = *reinterpret_cast<mstudioseqdesc_v16_t*>(dataLump.data + dataOffset);
+
+    pak->AddPointer(hdrLump, offsetof(AnimSeqAssetHeader_v11_t, szname), dataLump, nameOffset);
+    pak->AddPointer(hdrLump, offsetof(AnimSeqAssetHeader_v11_t, data), dataLump, dataOffset);
+
+    if (seqdesc.numautolayers > 0)
+        asset.ExpandGuidBuf(seqdesc.numautolayers);
+
+    const int autolayerBase = Studio_FixOffset_v16(seqdesc.autolayerindex);
+    for (int i = 0; i < seqdesc.numautolayers; ++i)
+    {
+        const size_t autolayerOff = dataOffset + autolayerBase + (i * sizeof(mstudioautolayer_v8_t));
+        const mstudioautolayer_v8_t* const autolayer = reinterpret_cast<const mstudioautolayer_v8_t*>(dataLump.data + autolayerOff);
+
+        const size_t offset = autolayerOff + offsetof(mstudioautolayer_v8_t, sequence);
+        Pak_RegisterGuidRefAtOffset(autolayer->sequence, offset, dataLump, asset);
+    }
+
+    asset.InitAsset(hdrLump.GetPointer(), sizeof(AnimSeqAssetHeader_v11_t), PagePtr_t::NullPtr(), ASEQ_VERSION_V11, AssetType::ASEQ);
+    asset.SetHeaderPointer(hdrLump.data);
+
+    pak->FinishAsset();
+}
+
+void Assets::AddAnimSeqAsset_v11(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry)
+{
+    UNUSED(mapEntry);
+    AnimSeq_InternalAddAnimSeq_v11(pak, assetGuid, assetPath);
 }
 
 PakGuid_t* AnimSeq_AutoAddSequenceRefs(CPakFileBuilder* const pak, uint32_t* const sequenceCount, const rapidjson::Value& mapEntry)
@@ -285,7 +454,14 @@ PakGuid_t* AnimSeq_AutoAddSequenceRefs(CPakFileBuilder* const pak, uint32_t* con
             if (!existingAsset)
             {
                 Debug("Auto-adding 'aseq' asset \"%s\".\n", sequenceName);
-                AnimSeq_InternalAddAnimSeq(pak, guid, sequenceName);
+
+                // Match the build target: S3 dedicated-server paks use aseq v7,
+                // S21-native paks use v11. The standalone aseq handler routes via
+                // PF_DEDI too, so both entry points stay consistent.
+                if (pak->IsFlagSet(PF_DEDI))
+                    AnimSeq_InternalAddAnimSeq(pak, guid, sequenceName);
+                else
+                    AnimSeq_InternalAddAnimSeq_v11(pak, guid, sequenceName);
             }
         }
 

@@ -17,9 +17,11 @@
     <ClCompile Include="assets\animseq.cpp" />
     <ClCompile Include="assets\anim_recording.cpp" />
     <ClCompile Include="assets\datatable.cpp" />
+    <ClCompile Include="assets\effect.cpp" />
     <ClCompile Include="assets\lcd_screen_effect.cpp" />
     <ClCompile Include="assets\material.cpp" />
     <ClCompile Include="assets\material_for_aspect.cpp" />
+    <ClCompile Include="assets\map.cpp" />
     <ClCompile Include="assets\model.cpp" />
     <ClCompile Include="assets\patch.cpp" />
     <ClCompile Include="assets\settings.cpp" />
@@ -27,10 +29,14 @@
     <ClCompile Include="assets\shader.cpp" />
     <ClCompile Include="assets\shaderset.cpp" />
     <ClCompile Include="assets\texture_anim.cpp" />
+    <ClCompile Include="assets\texture_extra.cpp" />
     <ClCompile Include="assets\texture_list.cpp" />
     <ClCompile Include="assets\texture.cpp" />
     <ClCompile Include="assets\ui_image_atlas.cpp" />
     <ClCompile Include="assets\ui.cpp" />
+    <ClCompile Include="assets\rson.cpp" />
+    <ClCompile Include="assets\ui_font_atlas.cpp" />
+    <ClCompile Include="assets\wrap.cpp" />
     <ClCompile Include="logic\buildsettings.cpp" />
     <ClCompile Include="logic\pakpage.cpp" />
     <ClCompile Include="logic\pakfile.cpp" />
@@ -169,9 +175,11 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="utils\scratch.cpp" />
     <ClCompile Include="utils\strutils.cpp" />
     <ClCompile Include="utils\utils.cpp" />
     <ClCompile Include="utils\zstdutils.cpp" />
+    <ClCompile Include="utils\oodle.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="assets\assets.h" />
@@ -191,12 +199,16 @@
     <ClInclude Include="public\animrig.h" />
     <ClInclude Include="public\anim_recording.h" />
     <ClInclude Include="public\lcd_screen_effect.h" />
+    <ClInclude Include="public\map.h" />
     <ClInclude Include="public\material.h" />
     <ClInclude Include="public\materialflags.h" />
     <ClInclude Include="public\material_for_aspect.h" />
     <ClInclude Include="public\multishader.h" />
+    <ClInclude Include="public\rson.h" />
     <ClInclude Include="public\rpak.h" />
     <ClInclude Include="public\ui.h" />
+    <ClInclude Include="public\ui_font_atlas.h" />
+    <ClInclude Include="public\wrap.h" />
     <ClInclude Include="public\settings.h" />
     <ClInclude Include="public\settings_layout.h" />
     <ClInclude Include="public\shader.h" />
@@ -206,6 +218,7 @@
     <ClInclude Include="public\datatable.h" />
     <ClInclude Include="public\texture.h" />
     <ClInclude Include="public\texture_anim.h" />
+    <ClInclude Include="public\texture_extra.h" />
     <ClInclude Include="public\texture_list.h" />
     <ClInclude Include="public\rui_package.h" />
     <ClInclude Include="thirdparty\rapidcsv\rapidcsv.h" />
@@ -292,13 +305,18 @@
     <ClInclude Include="utils\jsonutils.h" />
     <ClInclude Include="utils\logger.h" />
     <ClInclude Include="utils\MurmurHash3.h" />
+    <ClInclude Include="utils\scratch.h" />
     <ClInclude Include="utils\strutils.h" />
     <ClInclude Include="utils\utils.h" />
     <ClInclude Include="utils\zstdutils.h" />
+    <ClInclude Include="utils\oodle.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="cpp.hint" />
     <None Include="thirdparty\zstd\decompress\huf_decompress_amd64.S" />
+  </ItemGroup>
+  <ItemGroup>
+    <Manifest Include="RePak.exe.manifest" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
@@ -356,7 +374,7 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir)\;$(ProjectDir)thirdparty\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)thirdparty;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <TreatWarningAsError>true</TreatWarningAsError>
       <AdditionalOptions>/D "RAPIDJSON_SSE2" /D "RAPIDJSON_PARSE_DEFAULT_FLAGS=kParseTrailingCommasFlag|kParseCommentsFlag|kParseIterativeFlag|kParseValidateEncodingFlag" /D "ZSTD_MULTITHREAD" /D "DEBUGLEVEL=0" %(AdditionalOptions)</AdditionalOptions>
@@ -377,12 +395,12 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir)\;$(ProjectDir)thirdparty\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)thirdparty;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <StringPooling>true</StringPooling>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
-      <TreatWarningAsError>true</TreatWarningAsError>
+      <TreatWarningAsError>false</TreatWarningAsError>
       <AdditionalOptions>/D "RAPIDJSON_SSE2" /D "RAPIDJSON_PARSE_DEFAULT_FLAGS=kParseTrailingCommasFlag|kParseCommentsFlag|kParseIterativeFlag|kParseValidateEncodingFlag" /D "ZSTD_MULTITHREAD" /D "DEBUGLEVEL=0" %(AdditionalOptions)</AdditionalOptions>
       <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>

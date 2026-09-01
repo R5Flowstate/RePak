@@ -1,6 +1,10 @@
 #include "pch.h"
 #include "rtech.h"
 
+// Cache for StringToGuid results - uses std::string for stable keys
+static std::unordered_map<std::string, PakGuid_t> g_guidCache;
+static constexpr size_t MAX_GUID_CACHE_SIZE = 10000; // Prevent unbounded growth
+
 // compute a guid from input string data that resides in a memory address that
 // is aligned to a 4 byte boundary
 static PakGuid_t StringToGuidAligned(const char* string)
@@ -124,9 +128,31 @@ static PakGuid_t StringToGuidUnaligned(const char* string)
 
 PakGuid_t RTech::StringToGuid(const char* const string)
 {
-	return ((uintptr_t)string & 3)
+	// Check cache first
+	const auto it = g_guidCache.find(string);
+	if (it != g_guidCache.end())
+		return it->second;
+
+	// Compute and cache
+	const PakGuid_t result = ((uintptr_t)string & 3)
 		? StringToGuidUnaligned(string)
 		: StringToGuidAligned(string);
+
+	// Add to cache (with size limit to prevent unbounded growth)
+	if (g_guidCache.size() >= MAX_GUID_CACHE_SIZE)
+	{
+		// Simple cache eviction: clear if too large
+		// For better performance, could use LRU instead
+		g_guidCache.clear();
+	}
+	g_guidCache[string] = result;
+
+	return result;
+}
+
+void RTech::ClearGuidCache()
+{
+	g_guidCache.clear();
 }
 
 std::uint32_t RTech::StringToUIMGHash(const char* const str)

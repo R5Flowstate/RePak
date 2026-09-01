@@ -68,6 +68,32 @@ static void RePak_BuildFromList(const js::Document& doc, const js::Value& list, 
 
     RePak_InitBuilder(doc, mapPath, settings, streamBuilder);
 
+    // Pre-scan pass: collect every asset guid declared across ALL paks in the list
+    // into a build-wide set. Each pak builds independently (the guid cache is cleared
+    // between builds), so without this a per-pak reference check cannot see assets
+    // that live in a sibling pak of the same build (e.g. a settings asset in
+    // root_lgnd_skins referencing a model packed into common_mp). With it, such
+    // cross-pak references validate; only refs absent from the entire build are flagged.
+    for (const js::Value& pak : list.GetArray())
+    {
+        if (!pak.IsString())
+            continue;
+
+        js::Document pakDoc;
+        RePak_ParseListedDocument(pakDoc, settings.GetBuildMapPath(), pak.GetString());
+
+        js::Value::ConstMemberIterator filesIt;
+        if (!JSON_GetIterator(pakDoc, "files", JSONFieldType_e::kArray, filesIt))
+            continue;
+
+        for (const js::Value& file : filesIt->value.GetArray())
+        {
+            const char* const assetPath = JSON_GetValueOrDefault(file, "_path", static_cast<const char*>(nullptr));
+            if (assetPath)
+                settings.AddGlobalKnownAsset(Pak_GetGuidOverridable(file, assetPath));
+        }
+    }
+
     ssize_t i = -1;
 
     for (const js::Value& pak : list.GetArray())
@@ -84,6 +110,7 @@ static void RePak_BuildFromList(const js::Document& doc, const js::Value& list, 
         RePak_ParseListedDocument(pakDoc, settings.GetBuildMapPath(), pak.GetString());
 
         CPakFileBuilder pakFile(&settings, &streamBuilder);
+        RTech::ClearGuidCache(); // Clear cache between pak builds
         pakFile.BuildFromMap(pakDoc);
     }
 
@@ -214,8 +241,13 @@ static uint16_t RePak_OpenPakAndValidateHeader(BinaryIO& bio, const char* const 
     return version;
 }
 
-static void RePak_HandleCompressPak(const char* const pakPath, const int compressLevel, const int workerCount)
+static void RePak_HandleCompressPak(const char* const pakPath, const char* const method, const int compressLevel, const int workerCount, const int backwardCompatMajor)
 {
+    const bool useOodle = (_stricmp(method, "oodle") == 0);
+
+    if (!useOodle && _stricmp(method, "zstd") != 0)
+        Error("Unknown compression method \"%s\"; expected \"zstd\" or \"oodle\".\n", method);
+
     BinaryIO bio;
     const uint16_t version = RePak_OpenPakAndValidateHeader(bio, pakPath);
 
@@ -231,15 +263,28 @@ static void RePak_HandleCompressPak(const char* const pakPath, const int compres
     if (hdr->flags & (PAK_HEADER_FLAGS_RTECH_ENCODED | PAK_HEADER_FLAGS_OODLE_ENCODED | PAK_HEADER_FLAGS_ZSTD_ENCODED))
         Error("Pak file \"%s\" is already encoded using %s!\n", pakPath, Pak_EncodeAlgorithmToString(hdr->flags));
 
-    const size_t newSize = Pak_EncodeStreamAndSwap(bio, compressLevel, workerCount, version, pakPath);
+    if (useOodle)
+    {
+        // Oodle stores the compressed-region size only (excludes the header),
+        // matching the apex/s21 runtime convention.
+        const size_t regionSize = Pak_OodleEncodeStreamAndSwap(bio, compressLevel, backwardCompatMajor, version, pakPath);
 
-    if (!newSize)
-        return; // Failure, don't mutate the file.
+        if (!regionSize)
+            return; // Failure, don't mutate the file.
 
-    // Update the header to accommodate for the compression method
-    // and the new size so the runtime is aware of it.
-    hdr->flags |= PAK_HEADER_FLAGS_ZSTD_ENCODED;
-    hdr->compressedSize = newSize;
+        hdr->flags |= PAK_HEADER_FLAGS_OODLE_ENCODED;
+        hdr->compressedSize = regionSize;
+    }
+    else
+    {
+        const size_t newSize = Pak_EncodeStreamAndSwap(bio, compressLevel, workerCount, version, pakPath);
+
+        if (!newSize)
+            return; // Failure, don't mutate the file.
+
+        hdr->flags |= PAK_HEADER_FLAGS_ZSTD_ENCODED;
+        hdr->compressedSize = newSize;
+    }
 
     bio.Seek(0); // Write the new header out.
     bio.Write(tempHdrBuf, headerSize);
@@ -259,21 +304,35 @@ static void RePak_HandleDecompressPak(const char* const pakPath)
 
     PakHdr_t* const hdr = (PakHdr_t*)tempHdrBuf;
 
-    // TODO: support these are well.
-    if (hdr->flags & (PAK_HEADER_FLAGS_RTECH_ENCODED | PAK_HEADER_FLAGS_OODLE_ENCODED))
+    // TODO: support RTech as well.
+    if (hdr->flags & PAK_HEADER_FLAGS_RTECH_ENCODED)
         Error("Pak file \"%s\" is encoded using %s which is unsupported!\n", pakPath, Pak_EncodeAlgorithmToString(hdr->flags));
 
-    if (!(hdr->flags & PAK_HEADER_FLAGS_ZSTD_ENCODED))
+    const bool isOodle = (hdr->flags & PAK_HEADER_FLAGS_OODLE_ENCODED) != 0;
+    const bool isZStd = (hdr->flags & PAK_HEADER_FLAGS_ZSTD_ENCODED) != 0;
+
+    if (!isOodle && !isZStd)
         Error("Pak file \"%s\" is already decoded!\n", pakPath);
 
-    const size_t newSize = Pak_DecodeStreamAndSwap(bio, version, pakPath);
+    size_t newSize;
+
+    if (isOodle)
+    {
+        // decompressedSize is the full uncompressed file size (header included).
+        const size_t rawRegionSize = static_cast<size_t>(hdr->decompressedSize) - headerSize;
+        newSize = Pak_OodleDecodeStreamAndSwap(bio, version, pakPath, rawRegionSize);
+    }
+    else
+    {
+        newSize = Pak_DecodeStreamAndSwap(bio, version, pakPath);
+    }
 
     if (!newSize)
         return; // Failure, don't mutate the file.
 
     // Update the header to accommodate for the compression method
     // and the new size so the runtime is aware of it.
-    hdr->flags &= ~PAK_HEADER_FLAGS_ZSTD_ENCODED;
+    hdr->flags &= ~(PAK_HEADER_FLAGS_ZSTD_ENCODED | PAK_HEADER_FLAGS_OODLE_ENCODED);
     hdr->compressedSize = newSize;
 
     // Should never happen, but in case it does inform the user and
@@ -319,17 +378,24 @@ static void RePak_HandleCommandLine(const int argc, char** argv)
 
     if (RePak_CheckCommandLine(argv[1], REPAK_COMPRESS_PAK_COMMAND, argc, 3))
     {
+        const char* method = (argc > 3) ? argv[3] : "zstd";
+
         int compressLevel = REPAK_DEFAULT_COMPRESS_LEVEL;
 
-        if ((argc > 3) && (!JSON_StringToNumber(argv[3], strlen(argv[3]), compressLevel)))
+        if ((argc > 4) && (!JSON_StringToNumber(argv[4], strlen(argv[4]), compressLevel)))
             Error("%s: failed to parse compressLevel for argument \"%s\".\n", __FUNCTION__, argv[1]);
 
         int workerCount = REPAK_DEFAULT_COMPRESS_WORKERS;
 
-        if ((argc > 4) && (!JSON_StringToNumber(argv[4], strlen(argv[4]), workerCount)))
+        if ((argc > 5) && (!JSON_StringToNumber(argv[5], strlen(argv[5]), workerCount)))
             Error("%s: failed to parse workerCount for argument \"%s\".\n", __FUNCTION__, argv[1]);
 
-        RePak_HandleCompressPak(argv[2], compressLevel, workerCount);
+        int backwardCompatMajor = 0; // 0 = encoder default; >0 = Oodle2 major version for backward-compatible streams
+
+        if ((argc > 6) && (!JSON_StringToNumber(argv[6], strlen(argv[6]), backwardCompatMajor)))
+            Error("%s: failed to parse backwardCompatMajor for argument \"%s\".\n", __FUNCTION__, argv[1]);
+
+        RePak_HandleCompressPak(argv[2], method, compressLevel, workerCount, backwardCompatMajor);
         return;
     }
 

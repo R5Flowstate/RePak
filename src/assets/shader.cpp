@@ -3,6 +3,7 @@
 #include "public/shader.h"
 #include "public/multishader.h"
 #include "utils/dxutils.h"
+#include "utils/jsonutils.h"
 
 static void Shader_LoadFromMSW(CPakFileBuilder* const pak, const char* const assetPath, CMultiShaderWrapperIO::ShaderCache_t& shaderCache)
 {
@@ -88,14 +89,11 @@ static void Shader_CreateFromMSW(CPakFileBuilder* const pak, PakPageLump_s& cpuD
 		}
 	}
 
-	// Data chunk used by pointer "unk_10" and "shaderInputFlags"
-	// The first set of data in the buffer is reserved data for when the asset is loaded (equal to 16 bytes per shader entry)
-	// 
-	// The remainder of the data is used for the input layout flags of each shader.
-	// This data consists of 2 QWORDs per shader entry, with the first being set to the flags
-	// and the second being unknown.
+	// unk_10 is the HW-shader array: v15 stride 24. Under-reserve overlaps shaderInputFlags
+	// and the engine reads a stomped shader pointer as a vertex format. Two QWORDs of input flags follow.
+	const size_t hwShaderStride = std::is_same_v<ShaderAssetHeader_t, ShaderAssetHeader_v15_t> ? 24 : 16;
 	const size_t inputFlagsDataSize = numShaderBuffers * (2 * sizeof(uint64_t));
-	const size_t reservedDataSize = numShaderBuffers * (16);
+	const size_t reservedDataSize = numShaderBuffers * hwShaderStride;
 	PakPageLump_s shaderInfoChunk = pak->CreatePageLump(reservedDataSize + inputFlagsDataSize, SF_CPU, 1);
 
 	pak->AddPointer(hdrChunk, offsetof(ShaderAssetHeader_t, unk_10), shaderInfoChunk, 0);
@@ -126,6 +124,94 @@ static void Shader_SetupHeader(ShaderAssetHeader_v12_t* const hdr, const CMultiS
 	// Set to invalid so we can update it when a buffer is found, and detect that it has been set.
 	hdr->type = eShaderType::Invalid;
 	memcpy_s(hdr->shaderFeatures, sizeof(hdr->shaderFeatures), shader->features, sizeof(shader->features));
+}
+
+static void Shader_SetupHeader(ShaderAssetHeader_v15_t* const hdr, const CMultiShaderWrapperIO::Shader_t* const shader)
+{
+	// Set to invalid so we can update it when a buffer is found, and detect that it has been set.
+	hdr->type = eShaderType::Invalid;
+
+	// Copy the 7 MSW feature bytes verbatim into envType + envOptScales.
+	// These preserve the real env-permutation descriptors used at draw time.
+	static_assert(offsetof(ShaderAssetHeader_v15_t, envOptScales) == offsetof(ShaderAssetHeader_v15_t, envType) + 1);
+	memcpy_s(&hdr->envType, sizeof(hdr->envType) + sizeof(hdr->envOptScales), shader->features, sizeof(shader->features));
+
+	// Reconcile the bytecode-buffer count:
+	//   envType == MTLENVTYPE_CUSTOM_COUNT_N (1..17) -> count = N (literal)
+	//   envType == MTLENVTYPE_MTLENVOPT   (0xFF/-1)  -> count derived from
+	//       base = (envOptScales[0]!=0)+1; *2 per nonzero envOptScales[1..3]
+	// MSW carries the count (numShaderDescriptors) but NOT the byte at +0x10
+	// ("isReference"), so envType/envOptScales are kept as-is and +0x10 is reconstructed.
+	const size_t n = shader->entries.size();
+	assert(n > 0 && n < 0x7F);
+	hdr->isReference = 0;
+
+	if (hdr->envType == 0xFF) // MTLENVTYPE_MTLENVOPT
+	{
+		// +0x10 is a fourth count-doubler. Write it so the engine derives exactly n buffers;
+		// a phantom walk past the array AVs in CreateVertexShader on DXBC bytes.
+		size_t base = (hdr->envOptScales[0] != 0) + 1;
+		if (hdr->envOptScales[1]) base *= 2;
+		if (hdr->envOptScales[2]) base *= 2;
+		if (hdr->envOptScales[3]) base *= 2;
+
+		if (n == base)
+		{
+			hdr->isReference = 0;       // engine count = base = n
+		}
+		else if (n == base * 2)
+		{
+			// Engine count = base*2 = n. The VALUE is the debug-permutation index mask:
+			// the S21 loader skips creating entries where
+			// (isReference & entryIndex) != 0, i.e. the stripped/size-only debug half.
+			// Respawn-genuine S21 paks use exactly n/2 (the top index bit); the old
+			// constant 4 only masked correctly for 8-entry shaders.
+			hdr->isReference = static_cast<uint8_t>(n / 2);
+		}
+		else
+		{
+			// Feature bytes inconsistent with the count (e.g. zero/lossy MSW export):
+			// fall back to the engine's literal-count form (valid MTLENVTYPE_CUSTOM_COUNT_N).
+			Warning("Shader v15: envOptScales derive %zu != count %zu; falling back to literal count.\n", base, n);
+			hdr->envType = static_cast<uint8_t>(n);
+			memset(hdr->envOptScales, 0, sizeof(hdr->envOptScales));
+			hdr->isReference = 0;
+		}
+	}
+	else if (hdr->envType != n)
+	{
+		// envType present but inconsistent (incl. envType==0 from a lossy MSW export):
+		// force the literal-count form so the engine parses the right buffer count.
+		Warning("Shader v15: envType %u != count %zu; forcing literal count.\n", hdr->envType, n);
+		hdr->envType = static_cast<uint8_t>(n);
+		memset(hdr->envOptScales, 0, sizeof(hdr->envOptScales));
+	}
+
+	// Defensive post-condition: re-derive the engine's buffer count from the FINAL header
+	// fields and require it to equal n. A mismatch is the over-/under-iteration crash
+	// waiting to happen -- fail loud at pack time instead of at shader create.
+	{
+		size_t engineCount;
+		if (hdr->envType == 0xFF)
+		{
+			engineCount = (hdr->envOptScales[0] != 0) + 1;
+			if (hdr->envOptScales[1]) engineCount *= 2;
+			if (hdr->envOptScales[2]) engineCount *= 2;
+			if (hdr->envOptScales[3]) engineCount *= 2;
+			if (hdr->isReference)      engineCount *= 2;
+		}
+		else
+		{
+			engineCount = hdr->envType;
+		}
+		if (engineCount != n)
+			Error("Shader v15: packed buffer-count %zu != actual %zu (envType=0x%02X isRef=%u); engine would over-/under-iterate.\n",
+				engineCount, n, hdr->envType, hdr->isReference);
+	}
+
+	// Trailing fields: +0x28 = 0, +0x30 = 0xFFFFFFFF sentinel (not a pointer).
+	hdr->unk_28 = 0;
+	hdr->costInfo = 0xFFFFFFFFull;
 }
 
 template<typename ShaderAssetHeader_t>
@@ -180,6 +266,40 @@ static void Shader_AddShaderV12(CPakFileBuilder* const pak, const char* const as
 	Shader_InternalAddShader<ShaderAssetHeader_v12_t>(pak, assetPath, shader, shaderGuid, 12);
 }
 
+static void Shader_AddShaderV15(CPakFileBuilder* const pak, const char* const assetPath, const CMultiShaderWrapperIO::Shader_t* const shader, const PakGuid_t shaderGuid)
+{
+	Shader_InternalAddShader<ShaderAssetHeader_v15_t>(pak, assetPath, shader, shaderGuid, 15);
+}
+
+// Child/reference shader (v15): no cpu bytecode of its own. It carries the PARENT
+// shader's guid in the unk_10 slot (+0x18), which the engine resolves at load via
+// FindAssetByGUID to share the parent's bytecode. Verified against the shipping district
+// children (type=SHADER_TYPE_INVALID(9), shaderIterationMode=1, no relocations,
+// costInfo=0xFFFFFFFF sentinel). Not expressible via MSW, so packed from the manifest.
+static void Shader_AddChildShaderV15(CPakFileBuilder* const pak, const char* const assetPath, const PakGuid_t shaderGuid, const PakGuid_t parentGuid)
+{
+	PakAsset_t& asset = pak->BeginAsset(shaderGuid, assetPath);
+	PakPageLump_s hdrChunk = pak->CreatePageLump(sizeof(ShaderAssetHeader_v15_t), SF_HEAD, 8);
+
+	ShaderAssetHeader_v15_t* const hdr = reinterpret_cast<ShaderAssetHeader_v15_t*>(hdrChunk.data);
+
+	hdr->type = static_cast<eShaderType>(9); // SHADER_TYPE_INVALID
+	hdr->shaderIterationMode = 1;
+	hdr->costInfo = 0xFFFFFFFFull;
+
+	// write the raw parent guid into the unk_10 slot, then register it as a guid
+	// dependency (raw guid ref, not a page pointer -- matches shaderset VS/PS refs).
+	memcpy(&hdr->unk_10, &parentGuid, sizeof(PakGuid_t));
+	Pak_RegisterGuidRefAtOffset(parentGuid, offsetof(ShaderAssetHeader_v15_t, unk_10), hdrChunk, asset);
+
+	asset.InitAsset(
+		hdrChunk.GetPointer(), sizeof(ShaderAssetHeader_v15_t),
+		PagePtr_t::NullPtr(), 15, AssetType::SHDR);
+	asset.SetHeaderPointer(hdrChunk.data);
+
+	pak->FinishAsset();
+}
+
 bool Shader_AutoAddShader(CPakFileBuilder* const pak, const char* const assetPath, const CMultiShaderWrapperIO::Shader_t* const shader, const PakGuid_t shaderGuid, const int shaderAssetVersion)
 {
 	PakAsset_t* const existingAsset = pak->GetAssetByGuid(shaderGuid, nullptr, true);
@@ -189,8 +309,12 @@ bool Shader_AutoAddShader(CPakFileBuilder* const pak, const char* const assetPat
 
 	Debug("Auto-adding 'shdr' asset \"%s\".\n", assetPath);
 
-	const auto func = shaderAssetVersion == 8 ? Shader_AddShaderV8 : Shader_AddShaderV12;
-	func(pak, assetPath, shader, shaderGuid);
+	switch (shaderAssetVersion)
+	{
+	case 8:  Shader_AddShaderV8(pak, assetPath, shader, shaderGuid); break;
+	case 15: Shader_AddShaderV15(pak, assetPath, shader, shaderGuid); break;
+	default: Shader_AddShaderV12(pak, assetPath, shader, shaderGuid); break;
+	}
 
 	return true;
 }
@@ -211,4 +335,21 @@ void Assets::AddShaderAsset_v12(CPakFileBuilder* const pak, const PakGuid_t asse
 
 	Shader_LoadFromMSW(pak, assetPath, cache);
 	Shader_AddShaderV12(pak, assetPath, cache.shader, assetGuid);
+}
+
+void Assets::AddShaderAsset_v15(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry)
+{
+	// Child/reference shaders have no bytecode (no MSW) -- the manifest supplies a
+	// "$parentShader" guid instead, and we emit a header-only child shader.
+	const PakGuid_t parentShader = JSON_GetValueOrDefault(mapEntry, "$parentShader", static_cast<PakGuid_t>(0));
+	if (parentShader != 0)
+	{
+		Shader_AddChildShaderV15(pak, assetPath, assetGuid, parentShader);
+		return;
+	}
+
+	CMultiShaderWrapperIO::ShaderCache_t cache = {};
+
+	Shader_LoadFromMSW(pak, assetPath, cache);
+	Shader_AddShaderV15(pak, assetPath, cache.shader, assetGuid);
 }

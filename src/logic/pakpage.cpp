@@ -135,6 +135,8 @@ PakPage_s& CPakPageBuilder::FindOrCreatePage(const int flags, const int align, c
 
 	PakSlab_s& slab = FindOrCreateSlab(flags, align);
 
+	// SF_HEAD pages are APPEND-ONLY. Compaction walks descriptors in table order; back-filling
+	// a late header into an earlier page leaves that descriptor unpatched (guid-as-page-index AV).
 	PakPage_s* toReturn = nullptr;
 	int lastAlignDiff = INT32_MAX;
 
@@ -147,11 +149,6 @@ PakPage_s& CPakPageBuilder::FindOrCreatePage(const int flags, const int align, c
 
 		PakPageHdr_s& header = page.header;
 
-		// Note: check on aligned page size, because the page data size is not
-		// necessarily aligned to its own alignment when we are still building
-		// pages, the alignment and padding happens after all pages have been
-		// built. The data should remain below PAK_MAX_PAGE_MERGE_SIZE when it
-		// has been padded out, else a new page should be created.
 		if (IALIGN(header.dataSize, max(header.alignment, align)) + size > PAK_MAX_PAGE_MERGE_SIZE)
 			continue;
 
@@ -195,6 +192,44 @@ PakPage_s& CPakPageBuilder::FindOrCreatePage(const int flags, const int align, c
 }
 
 //-----------------------------------------------------------------------------
+// Ensures the current page with matching flags has enough remaining capacity
+// for the given size. If not, forces creation of a new page so subsequent
+// CreatePageLump calls land on the same page.
+//-----------------------------------------------------------------------------
+void CPakPageBuilder::EnsurePageCapacity(const int flags, const int align, const int requiredSize)
+{
+	if (requiredSize > PAK_MAX_PAGE_MERGE_SIZE)
+		return;
+
+	for (int i = static_cast<int>(m_pages.size()) - 1; i >= 0; i--)
+	{
+		PakPage_s& page = m_pages[i];
+
+		if (page.flags != flags)
+			continue;
+
+		PakPageHdr_s& header = page.header;
+		const int freeSpace = PAK_MAX_PAGE_MERGE_SIZE - IALIGN(header.dataSize, max(header.alignment, align));
+
+		if (freeSpace >= requiredSize)
+			return;
+
+		break;
+	}
+
+	PakSlab_s& slab = FindOrCreateSlab(flags, align);
+
+	PakPage_s& newPage = m_pages.emplace_back();
+
+	newPage.index = static_cast<int>(m_pages.size() - 1);
+	newPage.flags = flags;
+	newPage.header.slabIndex = slab.index;
+	newPage.header.alignment = align;
+	newPage.header.dataSize = 0;
+	newPage.lastEpoch = m_assetEpoch;
+}
+
+//-----------------------------------------------------------------------------
 // Create a page lump, which is a piece of data that will be placed inside the
 // page with user requested alignment.
 //-----------------------------------------------------------------------------
@@ -208,6 +243,10 @@ const PakPageLump_s CPakPageBuilder::CreatePageLump(const int size, const int fl
 	const int alignedPageLumpSize = IALIGN(size, align);
 
 	PakPage_s& page = FindOrCreatePage(flags, align, alignedPageLumpSize);
+
+	// Record the asset epoch so append-only header pages are only reused while
+	// they remain the open page of the current asset run.
+	page.lastEpoch = m_assetEpoch;
 
 	// Number of bytes required to pad the page to the requested alignment
 	const int pagePadAmount = IALIGN(page.header.dataSize, align) - page.header.dataSize;

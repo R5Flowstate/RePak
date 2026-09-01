@@ -5,6 +5,7 @@
 //=============================================================================//
 #include <pch.h>
 #include "streamfile.h"
+#include <sys/stat.h>
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -25,8 +26,6 @@ void CStreamFileBuilder::Init(const js::Document& doc, const bool useOptional)
 	{
 		m_mandatoryStreamFileName.assign(mandatoryIt->value.GetString(), mandatoryIt->value.GetStringLength());
 		Utils::FixSlashes(m_mandatoryStreamFileName);
-
-		CreateStreamFileStream(m_mandatoryStreamFileName, STREAMING_SET_MANDATORY);
 	}
 
 	rapidjson::Value::ConstMemberIterator optionalIt;
@@ -35,8 +34,6 @@ void CStreamFileBuilder::Init(const js::Document& doc, const bool useOptional)
 	{
 		m_optionalStreamFileName.assign(optionalIt->value.GetString(), optionalIt->value.GetStringLength());
 		Utils::FixSlashes(m_optionalStreamFileName);
-
-		CreateStreamFileStream(m_optionalStreamFileName, STREAMING_SET_OPTIONAL);
 	}
 
 	rapidjson::Value::ConstMemberIterator streamCacheIt;
@@ -117,6 +114,58 @@ void CStreamFileBuilder::Shutdown()
 }
 
 //-----------------------------------------------------------------------------
+// Reopen a starpak for append. Put cursor must stay 4096-aligned: the packed
+// stream offset overwrites the low 12 bits with the starpak index.
+//-----------------------------------------------------------------------------
+void CStreamFileBuilder::AdoptExistingStreamFile(BinaryIO& out, const std::string& fullFilePath,
+	const PakStreamSet_e set, const int64_t fileSize)
+{
+	const char* const setName = Pak_StreamSetToName(set);
+
+	if (fileSize < static_cast<int64_t>(STARPAK_DATABLOCK_ALIGNMENT + sizeof(size_t)))
+		Error("Existing %s streaming file \"%s\" is too small to append to (%lld bytes).\n",
+			setName, fullFilePath.c_str(), (long long)fileSize);
+
+	out.SeekGet(fileSize - sizeof(size_t));
+	const size_t entryCount = out.Read<size_t>();
+
+	const int64_t tableSize = static_cast<int64_t>(entryCount) * sizeof(PakStreamSetAssetEntry_s);
+	const int64_t tableStart = fileSize - static_cast<int64_t>(sizeof(size_t)) - tableSize;
+
+	if (entryCount == 0 || tableStart < STARPAK_DATABLOCK_ALIGNMENT || tableStart % STARPAK_DATABLOCK_ALIGNMENT != 0)
+		Error("Existing %s streaming file \"%s\" has an unreadable entry table (%zu entries, table at %lld).\n",
+			setName, fullFilePath.c_str(), entryCount, (long long)tableStart);
+
+	std::vector<PakStreamSetAssetEntry_s>& dataBlockDescs = set == STREAMING_SET_MANDATORY
+		? m_mandatoryStreamingDataBlocks
+		: m_optionalStreamingDataBlocks;
+
+	dataBlockDescs.resize(entryCount);
+
+	out.SeekGet(tableStart);
+	out.Read(dataBlockDescs.data(), static_cast<size_t>(tableSize));
+
+	for (const PakStreamSetAssetEntry_s& desc : dataBlockDescs)
+	{
+		if (desc.offset < STARPAK_DATABLOCK_ALIGNMENT || desc.size <= 0
+			|| desc.offset % STARPAK_DATABLOCK_ALIGNMENT != 0
+			|| desc.size % STARPAK_DATABLOCK_ALIGNMENT != 0
+			|| desc.offset + desc.size > tableStart)
+		{
+			Error("Existing %s streaming file \"%s\" declares an invalid data block (offset %lld, size %lld).\n",
+				setName, fullFilePath.c_str(), (long long)desc.offset, (long long)desc.size);
+		}
+	}
+
+	// New blocks overwrite the stale table; FinishStreamFileStream rewrites it
+	// in full, old entries included.
+	out.SeekPut(tableStart);
+
+	Log("Appending %s streaming file \"%s\" (%zu existing assets, %lld bytes of data).\n",
+		setName, fullFilePath.c_str(), entryCount, (long long)tableStart);
+}
+
+//-----------------------------------------------------------------------------
 // Purpose: creates the stream file stream and sets the header up
 //-----------------------------------------------------------------------------
 void CStreamFileBuilder::CreateStreamFileStream(const std::string& streamFilePath, const PakStreamSet_e set)
@@ -131,12 +180,23 @@ void CStreamFileBuilder::CreateStreamFileStream(const std::string& streamFilePat
 	std::string fullFilePath = m_buildSettings->GetOutputPath();
 	fullFilePath.append(streamFileName);
 
+	// A cache miss on a NEW streamed asset must not truncate the existing
+	// starpak -- reused assets still point at the old offsets.
+	struct _stat64 st {};
+	if (_stat64(fullFilePath.c_str(), &st) == 0 && st.st_size >= STARPAK_DATABLOCK_ALIGNMENT)
+	{
+		if (!out.Open(fullFilePath, BinaryIO::Mode_e::ReadWrite))
+			Error("Failed to open %s streaming file \"%s\" for append.\n", Pak_StreamSetToName(set), fullFilePath.c_str());
+
+		AdoptExistingStreamFile(out, fullFilePath, set, st.st_size);
+		return;
+	}
+
 	if (!out.Open(fullFilePath, BinaryIO::Mode_e::Write))
 		Error("Failed to open %s streaming file \"%s\".\n", Pak_StreamSetToName(set), fullFilePath.c_str());
 
 	Log("Opened %s streaming file stream \"%s\".\n", Pak_StreamSetToName(set), fullFilePath.c_str());
 
-	// write out the header and pad it out for the first asset entry.
 	const PakStreamSetFileHeader_s srpkHeader{ STARPAK_MAGIC, STARPAK_VERSION };
 	out.Write(srpkHeader);
 
@@ -169,7 +229,7 @@ void CStreamFileBuilder::FinishStreamFileStream(const PakStreamSet_e set)
 	const std::string& streamFileName = isMandatory ? m_mandatoryStreamFileName : m_optionalStreamFileName;
 
 	Log("Built %s streaming file \"%s\" with %zu assets, totaling %zd bytes.\n",
-		Pak_StreamSetToName(set), streamFileName.c_str(), entryCount, (ssize_t)out.GetSize());
+		Pak_StreamSetToName(set), streamFileName.c_str(), entryCount, (ssize_t)out.TellPut());
 
 	out.Close();
 }
@@ -198,9 +258,19 @@ bool CStreamFileBuilder::AddStreamingDataEntry(const int64_t size, const uint8_t
 	BinaryIO& out = isMandatory ? m_mandatoryStreamFile : m_optionalStreamFile;
 
 	if (!out.IsWritable())
+		CreateStreamFileStream(newStarPak, set);
+
+	if (!out.IsWritable())
 		Error("Attempted to write %s streaming asset without a stream file handle.\n", Pak_StreamSetToName(set));
 
-	const int64_t dataOffset = out.GetSize();
+	// The block offset must be 4096-aligned; PakAsset_t::GetPackedStreamOffset
+	// stores the starpak index in its low 12 bits.
+	const int64_t cursor = out.TellPut();
+	const int64_t dataOffset = IALIGN(cursor, (int64_t)STARPAK_DATABLOCK_ALIGNMENT);
+
+	if (dataOffset > cursor)
+		out.Pad(static_cast<size_t>(dataOffset - cursor));
+
 	assert(dataOffset >= STARPAK_DATABLOCK_ALIGNMENT);
 
 	out.Write(data, size);

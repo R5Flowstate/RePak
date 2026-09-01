@@ -46,6 +46,12 @@ struct PakPage_s
 	int flags;
 	PakPageHdr_s header;
 
+	// Asset epoch of the most recent lump placed on this page (see
+	// CPakPageBuilder::m_assetEpoch). Used to keep header (SF_HEAD) pages
+	// contiguous in asset-add order: an append-only header page may only be
+	// reused while it is still the "open" page of the current asset run.
+	int lastEpoch = -1;
+
 	// ordered list of data chunks belonging to this page.
 	std::vector<PakPageLump_s> lumps;
 };
@@ -68,7 +74,15 @@ public:
 	inline uint16_t GetSlabCount() const { return m_slabCount; }
 	inline uint16_t GetPageCount() const { return static_cast<uint16_t>(m_pages.size()); }
 
+	// Advance the asset epoch; called once per asset (CPakFileBuilder::BeginAsset).
+	// Header pages track the last epoch that touched them so they are never
+	// reused after the asset run that owns them has ended (keeps each header
+	// page's assets contiguous in the asset table -> required by the runtime
+	// pak-load compaction's single monotonic descriptor cursor).
+	inline void BeginAssetEpoch() { ++m_assetEpoch; }
+
 	const PakPageLump_s CreatePageLump(const int size, const int flags, const int align, void* const buf = nullptr);
+	void EnsurePageCapacity(const int flags, const int align, const int requiredSize);
 
 	void PadSlabSizeForPageAlignment();
 
@@ -83,6 +97,10 @@ private:
 private:
 	std::array<PakSlab_s, PAK_MAX_SLAB_COUNT> m_slabs;
 	uint16_t m_slabCount;
+
+	// Monotonic per-asset counter (advanced by BeginAssetEpoch). Used only to
+	// keep append-only header pages contiguous in asset-add order.
+	int m_assetEpoch = 0;
 
 	std::vector<PakPage_s> m_pages;
 };

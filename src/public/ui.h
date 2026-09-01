@@ -1,7 +1,5 @@
 #pragma once
 
-#define R2_UI_VERSION 30
-
 enum class VariableType : uint8_t {
 	NONE = 0x0,
 	STRING = 0x1,
@@ -20,12 +18,9 @@ enum class VariableType : uint8_t {
 struct Argument_s
 {
 	VariableType type;
-
 	uint8_t unk_1;
-
 	uint16_t dataOffset;
 	uint16_t nameOffset;
-
 	uint16_t shortHash;
 };
 
@@ -33,10 +28,8 @@ struct ArgCluster_s
 {
 	uint16_t argIndex;
 	uint16_t argCount;
-
 	uint8_t byte_4;
 	uint8_t byte_5;
-
 	uint16_t short_6;
 	uint16_t valueSize;
 	uint16_t dataStructSize;
@@ -45,42 +38,62 @@ struct ArgCluster_s
 	uint16_t renderJobCount;
 };
 
-struct IndexedColor_s {
-	uint16_t red;
-	uint16_t green;
-	uint16_t blue;
-	uint16_t alpha;
-};
-
+// V30 style descriptor - 52 bytes
+// Contains base style header (44 bytes) + partial font fields (8 bytes)
 struct StyleDescriptor_v30_s {
-	uint16_t type;
-	IndexedColor_s color0;
-	IndexedColor_s color1;
-	IndexedColor_s color2;
-	uint16_t blend;
-	uint16_t premul;
-	uint16_t val_1E;
-	uint16_t val_20;
-	uint16_t val_22;
-	uint16_t val_24;
-	uint16_t val_26;
-	uint16_t val_28;
-	uint16_t val_2A;
-	uint16_t val_2C;
-	uint16_t val_2E;
-	uint16_t val_30;
-	uint16_t val_32;
-};
+	// Base style header (44 bytes)
+	uint16_t type;              // +0x00: widget type
+	uint16_t color[3][4];       // +0x02: color indices [3 colors][RGBA] into data buffer
+	uint16_t tint[4];           // +0x1A: tint indices [RGBA]
+	uint16_t blend;             // +0x22: blend index
+	uint16_t premul;            // +0x24: premultiply index
+	uint16_t hue;               // +0x26: hue index
+	uint16_t saturation;        // +0x28: saturation index
+	uint16_t lightness;         // +0x2A: lightness index
 
-struct RuiMapping_v30_s
+	// Font-specific fields (partial, 8 bytes)
+	uint16_t fontHash;          // +0x2C: font hash index
+	uint16_t shadowAlpha;       // +0x2E: shadow alpha index
+	uint16_t shadowOffset[2];   // +0x30: shadow offset indices [X,Y]
+};
+static_assert(sizeof(StyleDescriptor_v30_s) == 52, "StyleDescriptor_v30_s must be 52 bytes");
+
+// V39+ style descriptor - 68 bytes
+// Contains full base style header (44 bytes) + complete font fields (24 bytes)
+struct StyleDescriptor_v39_s {
+	// Base style header (44 bytes)
+	uint16_t type;              // +0x00: widget type
+	uint16_t color[3][4];       // +0x02: color indices [3 colors][RGBA] into data buffer
+	uint16_t tint[4];           // +0x1A: tint indices [RGBA]
+	uint16_t blend;             // +0x22: blend index
+	uint16_t premul;            // +0x24: premultiply index
+	uint16_t hue;               // +0x26: hue index
+	uint16_t saturation;        // +0x28: saturation index
+	uint16_t lightness;         // +0x2A: lightness index
+
+	// Font-specific fields (24 bytes)
+	uint16_t fontHash;          // +0x2C: font hash index
+	uint16_t shadowAlpha;       // +0x2E: shadow alpha index
+	uint16_t shadowOffset[2];   // +0x30: shadow offset indices [X,Y]
+	uint16_t shadowBlur;        // +0x34: shadow blur index
+	uint16_t pixelHeight;       // +0x36: pixel height index
+	uint16_t pixelAspect;       // +0x38: pixel aspect ratio index
+	uint16_t outlineWidth;      // +0x3A: outline width index
+	uint16_t thicken;           // +0x3C: thicken index
+	uint16_t blur;              // +0x3E: blur index
+	uint16_t baselineShift;     // +0x40: baseline shift index
+	uint16_t kerning;           // +0x42: kerning index
+};
+static_assert(sizeof(StyleDescriptor_v39_s) == 68, "StyleDescriptor_v39_s must be 68 bytes");
+
+// Keyframing mapping entry - maps values through linear/cubic spline regression
+struct UIAssetMapping_t
 {
 	uint32_t dataCount;
-	uint16_t nestedMappingCount;
-	bool cublicSpline;
-	uint8_t pad;
+	uint16_t unk_4;
+	uint16_t unk_6;
 	float* data;
 };
-static_assert(sizeof(RuiMapping_v30_s) == 16);
 
 struct RuiHeader_v30_s
 {
@@ -91,10 +104,10 @@ struct RuiHeader_v30_s
 	float elementHeight;
 	float elementWidthRcp;
 	float elementHeightRcp;
-	const char* argNames;
+	char* argNames;
 	ArgCluster_s* argClusters;
 	Argument_s* arguments;
-	short argumentCount; // number of slots for arguments. not all are used. has to be power of 2
+	short argumentCount;
 	short keyframingCount;
 	uint16_t dataStructSize;
 	uint16_t dataStructInitSize;
@@ -103,7 +116,8 @@ struct RuiHeader_v30_s
 	uint16_t renderJobCount;
 	uint16_t argClusterCount;
 	StyleDescriptor_v30_s* styleDescriptors;
-	uint8_t* renderJobData; 
-	RuiMapping_v30_s* keyframings; // maps values to others through linear/cubic spline regression
+	uint8_t* renderJobData;
+	void* keyframings;
+	uint64_t codeCRC;
 };
-
+static_assert(sizeof(RuiHeader_v30_s) == 112, "S21 UI disk header is 112 bytes");

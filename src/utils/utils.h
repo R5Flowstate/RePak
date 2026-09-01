@@ -4,6 +4,9 @@ namespace Utils
 {
 	uintmax_t GetFileSize(const std::string& filename);
 	FILETIME GetSystemFileTime();
+		bool TryParseIso8601UtcToFileTime(const char* value, size_t length, FILETIME& outFileTime);
+		bool TryParseUnixTimestampToFileTime(int64_t seconds, FILETIME& outFileTime);
+		bool TryParseUnixTimestampToFileTime(uint64_t seconds, FILETIME& outFileTime);
 	
 	size_t PadBuffer(char** buf, size_t size, size_t alignment);
 	size_t WriteStringVector(BinaryIO& out, const std::vector<std::string>& dataVector);
@@ -15,6 +18,9 @@ namespace Utils
 
 	void ResolvePath(std::string& outPath, const std::filesystem::path& mapPath);
 	const char* ExtractFileName(const std::string& inPath);
+
+	void ProgressPrint(size_t current, size_t total, const char* const label = "");
+	void ProgressComplete();
 };
 
 extern bool Util_ReplaceStream(BinaryIO& mainStream, BinaryIO& toSwap, const char* const mainPath, const char* const toSwapPath);

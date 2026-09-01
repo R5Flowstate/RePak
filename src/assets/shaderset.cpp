@@ -51,8 +51,17 @@ static void ShaderSet_AutoAddEmbeddedShader(CPakFileBuilder* const pak, const CM
 	{
 		const std::string assetPath = Utils::VFormat("embedded_%llx", shaderGuid);
 
-		// note: shaderset v8 is tied to shader v8, shaderset v11 is tied to shader v12.
-		Shader_AutoAddShader(pak, assetPath.c_str(), shader, shaderGuid, assetVersion == 8 ? 8 : 12);
+		// shaderset version is tied to a shader version: v8->shdr v8, v11->shdr v12,
+		// v12->shdr v15 (S21-native).
+		int shaderVersion;
+		switch (assetVersion)
+		{
+		case 8:  shaderVersion = 8;  break;
+		case 12: shaderVersion = 15; break;
+		default: shaderVersion = 12; break;
+		}
+
+		Shader_AutoAddShader(pak, assetPath.c_str(), shader, shaderGuid, shaderVersion);
 	}
 }
 
@@ -104,8 +113,8 @@ void ShaderSet_InternalCreateSet(CPakFileBuilder* const pak, const char* const a
 	ShaderSet_SetInputSlots(hdr, vertexShader, true, shaderSet, assetVersion);
 	ShaderSet_SetInputSlots(hdr, pixelShader, false, shaderSet, assetVersion);
 
-	// On v11 shaders, the input count is added on top of the second one.
-	if (assetVersion == 11)
+	// On v11+ shadersets, the input count is added on top of the second one.
+	if (assetVersion >= 11)
 		hdr->textureInputCounts[1] += hdr->textureInputCounts[0];
 
 	hdr->numSamplers = shaderSet->numSamplers;
@@ -148,10 +157,12 @@ bool ShaderSet_AutoAddShaderSet(CPakFileBuilder* const pak, const PakGuid_t asse
 
 	Debug("Auto-adding 'shds' asset \"%s\".\n", assetPath);
 
-	if (assetVersion == 8)
-		ShaderSet_InternalAddShaderSet<ShaderSetAssetHeader_v8_t>(pak, assetGuid, assetPath, assetVersion);
-	else
-		ShaderSet_InternalAddShaderSet<ShaderSetAssetHeader_v11_t>(pak, assetGuid, assetPath, assetVersion);
+	switch (assetVersion)
+	{
+	case 8:  ShaderSet_InternalAddShaderSet<ShaderSetAssetHeader_v8_t>(pak, assetGuid, assetPath, assetVersion); break;
+	case 12: ShaderSet_InternalAddShaderSet<ShaderSetAssetHeader_v12_t>(pak, assetGuid, assetPath, assetVersion); break;
+	default: ShaderSet_InternalAddShaderSet<ShaderSetAssetHeader_v11_t>(pak, assetGuid, assetPath, assetVersion); break;
+	}
 
 	return true;
 }
@@ -166,4 +177,10 @@ void Assets::AddShaderSetAsset_v11(CPakFileBuilder* const pak, const PakGuid_t a
 {
 	UNUSED(mapEntry);
 	ShaderSet_InternalAddShaderSet<ShaderSetAssetHeader_v11_t>(pak, assetGuid, assetPath, 11);
+}
+
+void Assets::AddShaderSetAsset_v12(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry)
+{
+	UNUSED(mapEntry);
+	ShaderSet_InternalAddShaderSet<ShaderSetAssetHeader_v12_t>(pak, assetGuid, assetPath, 12);
 }

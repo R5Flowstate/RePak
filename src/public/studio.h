@@ -329,6 +329,111 @@ struct AnimSeqAssetHeader_t
 	uint32_t padding_1; // aligns full struct to 8 bytes
 };
 
+// S21 animseq header (64 bytes). Same 64B v11/v12 layout
+// (subheaderSize=64; only data/szname relocated for dep-less seqs). v11 differs from
+// v7 (48B): the dep pointers moved to +0x20/0x28/0x30 with u16 counts, and an
+// effectAssets pointer + runtime fields were added.
+struct AnimSeqAssetHeader_v11_t
+{
+	PagePtr_t data;   // +0x00 raw rseq (seqdesc)
+	PagePtr_t szname; // +0x08 debug name (placed before the rseq blob)
+	PagePtr_t rt;     // +0x10 runtime (null on disk)
+
+	uint16_t numModels;         // +0x18 numPropModels
+	uint16_t numAnimWindows;    // +0x1A
+	uint32_t streamableDataSize;// +0x1C
+
+	PagePtr_t pModels;           // +0x20 propModels (GUID array)
+	PagePtr_t pEffects;          // +0x28 effectAssets (GUID array)
+	PagePtr_t pSettings;         // +0x30 animWindowSettings (GUID array)
+	PagePtr_t streamableDataTempMem; // +0x38 runtime (null on disk)
+};
+static_assert(sizeof(AnimSeqAssetHeader_v11_t) == 64);
+
+// v16 "compressed" studio seqdesc, used by S21 v11 aseq .rseq blobs. Unlike the
+// v7/v8 mstudioseqdesc_t (all 32-bit indices), v16 packs offsets into uint16 fields
+// expanded via this packing: even values are byte offsets as-is; an odd value v
+// means ((v & 0xFFFE) << 4). Taken from RSX studio_r5_v16.h.
+static inline int Studio_FixOffset_v16(const uint16_t off)
+{
+	return static_cast<int>(static_cast<int>(off & 0xFFFE) << (4 * (off & 1)));
+}
+
+struct mstudioevent_v16_t
+{
+	float cycle;            // +0x00
+	int event;             // +0x04
+	int type;              // +0x08
+	int unk_C;             // +0x0C
+	uint16_t optionsindex; // +0x10 -> options string via FIX_OFFSET
+	uint16_t szeventindex; // +0x12
+};
+static_assert(sizeof(mstudioevent_v16_t) == 0x14);
+
+struct mstudioautolayer_v8_t
+{
+	PakGuid_t sequence; // +0x00 hashed aseq guid -> needs a guid descriptor
+	int iPose;          // +0x08
+	int flags;          // +0x0C
+	float start;        // +0x10
+	float peak;         // +0x14
+	float tail;         // +0x18
+	float end;          // +0x1C
+};
+static_assert(sizeof(mstudioautolayer_v8_t) == 0x20);
+
+struct mstudioseqdesc_v16_t
+{
+	uint16_t szlabelindex;          // +0x00
+	uint16_t szactivitynameindex;   // +0x02
+	int flags;                      // +0x04
+	uint16_t activity;              // +0x08
+	uint16_t actweight;             // +0x0A
+	uint16_t numevents;             // +0x0C
+	uint16_t eventindex;            // +0x0E
+	Vector3 bbmin;                  // +0x10
+	Vector3 bbmax;                  // +0x1C
+	uint16_t numblends;             // +0x28
+	uint16_t animindexindex;        // +0x2A
+	short paramindex[2];            // +0x2C
+	float paramstart[2];            // +0x30
+	float paramend[2];              // +0x38
+	float fadeintime;               // +0x40
+	float fadeouttime;              // +0x44
+	uint16_t localentrynode;        // +0x48
+	uint16_t localexitnode;         // +0x4A
+	uint16_t numikrules;            // +0x4C
+	uint16_t numautolayers;         // +0x4E
+	uint16_t autolayerindex;        // +0x50
+	uint16_t weightlistindex;       // +0x52
+	uint8_t groupsize[2];           // +0x54
+	uint16_t posekeyindex;          // +0x56
+	uint16_t numiklocks;            // +0x58
+	uint16_t iklockindex;           // +0x5A
+	uint16_t unk_5C;                // +0x5C
+	uint16_t cycleposeindex;        // +0x5E
+	uint16_t activitymodifierindex; // +0x60
+	uint16_t numactivitymodifiers;  // +0x62
+	int ikResetMask;                // +0x64
+	int unk_68;                     // +0x68
+	uint16_t weightFixupOffset;     // +0x6C
+	uint16_t weightFixupCount;      // +0x6E
+
+	inline const mstudioevent_v16_t* pEvent(const int i) const
+	{
+		return reinterpret_cast<const mstudioevent_v16_t*>(reinterpret_cast<const char*>(this) + Studio_FixOffset_v16(eventindex)) + i;
+	}
+	inline const char* pEventOptions(const mstudioevent_v16_t* const ev) const
+	{
+		return reinterpret_cast<const char*>(ev) + Studio_FixOffset_v16(ev->optionsindex);
+	}
+	inline const mstudioautolayer_v8_t* pAutoLayer(const int i) const
+	{
+		return reinterpret_cast<const mstudioautolayer_v8_t*>(reinterpret_cast<const char*>(this) + Studio_FixOffset_v16(autolayerindex)) + i;
+	}
+};
+static_assert(sizeof(mstudioseqdesc_v16_t) == 0x70);
+
 // size: 0x78 (120 bytes)
 struct ModelAssetHeader_t
 {
@@ -370,6 +475,150 @@ struct ModelAssetHeader_t
 	uint64_t Padding9 = 0;
 };
 static_assert(sizeof(ModelAssetHeader_t) == 120);
+
+//-----------------------------------------------------------------------------
+// Apex Season 16+ model family (used by mdl_ v16/v17/v18/v19). The pak-asset
+// header is the SAME for all of them (ModelAssetHeader_v16_t); only the embedded
+// .rmdl studiohdr differs (studiohdr_v16_t vs studiohdr_v17_t). S21 = v17.
+//-----------------------------------------------------------------------------
+
+// v16+ studiohdr offsets are compact uint16's; this expands them. The LSB is a
+// x16 scale flag: even -> literal offset, odd -> (o & 0xFFFE) << 4.
+#define STUDIO_FIX_OFFSET(o) (static_cast<int>(static_cast<int>((o) & 0xFFFE) << (4 * ((o) & 1))))
+
+// in v16+, a model's "texture" entry is just the material's asset guid.
+struct mstudiotexture_v16_t
+{
+	PakGuid_t guid;
+};
+
+// Per-LOD-group streaming descriptor inside a v17 studiohdr's groupHeaderOffset table.
+// The S21 client walks this table with a 16-byte stride.
+// rmdlconv's own copy of this struct (studio_r5_v16.h/v19.h) declares dataCompression
+// as a 4-byte int, making it 20 bytes -- that definition is wrong; it is never used to
+// reinterpret table entries (rmdlconv only byte-copies the region), so it never corrupted
+// output, but do NOT reuse it as a reference for this struct.
+struct studio_hw_groupdata_t
+{
+	int dataOffset;				// +0x00 offset into the model's streamed .vg data
+	int dataSizeCompressed;		// +0x04 -> becomes the FS_CheckAsyncRequest "count"
+	int dataSizeDecompressed;		// +0x08
+	uint8_t dataCompression;		// +0x0C compressionType_t; 0 == raw/uncompressed
+	uint8_t lodIndex;				// +0x0D
+	uint8_t lodCount;				// +0x0E
+	uint8_t lodMap;					// +0x0F
+};
+static_assert(sizeof(studio_hw_groupdata_t) == 16);
+
+// Embedded .rmdl header for v17 (the model `data` blob begins with this). Only
+// the leading fields needed by the packer are declared; everything past
+// textureindex stays opaque in the verbatim blob. Offsets verified vs RSX
+// (studio_r5_v16.h studiohdr_v17_t) and real S21 district rmdl bytes.
+struct studiohdr_v17_t
+{
+	int flags;						// +0x00
+	int checksum;					// +0x04
+	uint16_t sznameindex;			// +0x08
+	char name[33];					// +0x0A
+	uint8_t surfacepropLookup;		// +0x2B
+	float mass;						// +0x2C
+	int contents;					// +0x30
+	uint16_t hitboxsetindex;		// +0x34
+	uint8_t numhitboxsets;			// +0x36
+	uint8_t illumpositionattachmentindex; // +0x37
+	Vector3 illumposition;			// +0x38
+	Vector3 hull_min;				// +0x44
+	Vector3 hull_max;				// +0x50
+	Vector3 view_bbmin;				// +0x5C
+	Vector3 view_bbmax;				// +0x68
+	uint16_t boneCount;				// +0x74
+	uint16_t boneHdrOffset;			// +0x76
+	uint16_t boneDataOffset;		// +0x78
+	uint16_t numlocalseq;			// +0x7A
+	uint16_t localseqindex;			// +0x7C
+	uint16_t unk_7E[2];				// +0x7E
+	char activitylistversion;		// +0x82
+	uint8_t numlocalattachments;	// +0x83
+	uint16_t localattachmentindex;	// +0x84
+	uint16_t numlocalnodes;			// +0x86
+	uint16_t localnodenameindex;	// +0x88
+	uint16_t localNodeDataOffset;	// +0x8A
+	uint16_t numikchains;			// +0x8C
+	uint16_t ikchainindex;			// +0x8E
+	uint16_t numtextures;			// +0x90
+	uint16_t textureindex;			// +0x92
+
+	inline mstudiotexture_v16_t* pTexture(int i)
+	{
+		return reinterpret_cast<mstudiotexture_v16_t*>((char*)this + STUDIO_FIX_OFFSET(textureindex)) + i;
+	}
+
+	uint16_t numskinref;			// +0x94
+	uint16_t numskinfamilies;		// +0x96
+	uint16_t skinindex;				// +0x98
+	uint16_t numbodyparts;			// +0x9A
+	uint16_t bodypartindex;			// +0x9C
+	uint16_t uiPanelCount;			// +0x9E
+	uint16_t uiPanelOffset;			// +0xA0
+	uint16_t numlocalposeparameters; // +0xA2
+	uint16_t localposeparamindex;	// +0xA4
+	uint16_t surfacepropindex;		// +0xA6
+	uint16_t keyvalueindex;			// +0xA8
+	uint16_t virtualModel;			// +0xAA
+	uint16_t meshCount;				// +0xAC
+	uint16_t bonetablebynameindex;	// +0xAE
+	uint16_t boneStateOffset;		// +0xB0
+	uint16_t boneStateCount;		// +0xB2
+	uint16_t groupHeaderOffset;		// +0xB4 -> studio_hw_groupdata_t[groupHeaderCount], stride 16
+	uint16_t groupHeaderCount;		// +0xB6
+
+	inline studio_hw_groupdata_t* pLODGroup(int i)
+	{
+		// FIELD-RELATIVE: groupHeaderOffset is measured from the field's OWN position
+		// (offsetof + FIX_OFFSET), not the header base. Matches rmdlconv's v170
+		// accessor (studio_r5_v16.h pLODGroup). The bare STUDIO_FIX_OFFSET (header-base)
+		// form pointed 0xB4 bytes too low, so Model_FixStaleCompressedVgGroups patched
+		// a garbage region and left the stale compressed group table intact -> the
+		// engine issued a dataSizeCompressed-length read against raw VG bytes ->
+		// "FS_CheckAsyncRequest returned error" streaming fatal.
+		// (textureindex, by contrast, IS header-base -- do not unify these two.)
+		return reinterpret_cast<studio_hw_groupdata_t*>((char*)this + offsetof(studiohdr_v17_t, groupHeaderOffset) + STUDIO_FIX_OFFSET(groupHeaderOffset)) + i;
+	}
+};
+static_assert(offsetof(studiohdr_v17_t, view_bbmin) == 0x5C);
+static_assert(offsetof(studiohdr_v17_t, numtextures) == 0x90);
+static_assert(offsetof(studiohdr_v17_t, textureindex) == 0x92);
+static_assert(offsetof(studiohdr_v17_t, groupHeaderOffset) == 0xB4);
+static_assert(offsetof(studiohdr_v17_t, groupHeaderCount) == 0xB6);
+
+// size: 0x60 (96 bytes). pak-asset header for v16/v17/v18/v19.
+struct ModelAssetHeader_v16_t
+{
+	PagePtr_t pData;				// +0x00 -> studiohdr/rmdl blob
+	PagePtr_t pName;				// +0x08 -> model path string
+	char gap_10[8];					// +0x10
+	PagePtr_t pStaticPropVtxCache;	// +0x18 -> baked (permanent) VG for static props
+	PagePtr_t pAnimRigs;			// +0x20 -> arig guid array
+	uint32_t numAnimRigs;			// +0x28
+	uint32_t streamingDataSize;		// +0x2C -> size of VG data post-baking
+	Vector3 bbox_min;				// +0x30
+	Vector3 bbox_max;				// +0x3C
+	uint16_t gap_48;				// +0x48
+	uint16_t numAnimSeqs;			// +0x4A
+	char gap_4C[4];					// +0x4C
+	PagePtr_t pSequences;			// +0x50 -> aseq guid array
+	char gap_58[8];					// +0x58
+};
+static_assert(sizeof(ModelAssetHeader_v16_t) == 96);
+
+// CPU-page data for v16+ models (referenced via the asset's cpu pointer).
+struct ModelAssetCPU_v16_t
+{
+	PagePtr_t pPhysics;				// +0x00 -> .phy data
+	int dataSizePhys;				// +0x08
+	int dataSizeModel;				// +0x0C
+};
+static_assert(sizeof(ModelAssetCPU_v16_t) == 16);
 
 struct VertexGroupHeader_t
 {
