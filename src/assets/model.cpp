@@ -610,10 +610,31 @@ void Assets::AddModelAsset_v17(CPakFileBuilder* const pak, const PakGuid_t asset
 
     //
     // Register the model's material guids (inline u64 array in the data blob).
+    // "$materials" (positional guid array, v9 parity) overrides slots in place.
     //
+    rapidjson::Value::ConstMemberIterator materialsIt;
+    const bool hasMaterialOverrides = JSON_GetIterator(mapEntry, "$materials", JSONFieldType_e::kArray, materialsIt);
+    const rapidjson::Value* materialOverrides = hasMaterialOverrides ? &materialsIt->value : nullptr;
+
     for (int i = 0; i < studiohdr->numtextures; ++i)
     {
         mstudiotexture_v16_t* const tex = studiohdr->pTexture(i);
+
+        if (hasMaterialOverrides)
+        {
+            rapidjson::Value::ConstArray materialArray = materialOverrides->GetArray();
+
+            if (materialArray.Size() > static_cast<rapidjson::SizeType>(i))
+            {
+                const PakGuid_t guid = Pak_ParseGuid(materialArray[i]);
+
+                if (!guid)
+                    Error("Unable to parse material #%i.\n", i);
+
+                tex->guid = guid;
+            }
+        }
+
         const size_t pos = reinterpret_cast<char*>(tex) - dataLump.data;
         const size_t offset = pos + offsetof(mstudiotexture_v16_t, guid);
 

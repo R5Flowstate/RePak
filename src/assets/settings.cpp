@@ -559,6 +559,7 @@ static void SettingsAsset_WriteValues(const SettingsLayoutAsset_s& layoutAsset, 
 
             SettingsDynamicArray_s* const dynHdr = reinterpret_cast<SettingsDynamicArray_s*>(&dataLump.data[targetOffset]);
             dynHdr->arraySize = arraySize;
+            dynHdr->arrayOffset = 0;
 
             const SettingsLayoutAsset_s& subLayout = layoutAsset.subLayouts[layoutAsset.rootLayout.indexMap[cellIndex]];
             bool initOffset = false;
@@ -711,13 +712,22 @@ static void SettingsAsset_InternalAddSettingsAsset(CPakFileBuilder* const pak, c
     SettingsLayout_ParseLayout(pak, layoutAssetPath, layoutAsset);
 
     PakAsset_t& asset = pak->BeginAsset(assetGuid, assetPath);
-    PakPageLump_s hdrLump = pak->CreatePageLump(sizeof(SettingsAssetHeader_s), SF_HEAD, 8);
 
-    SettingsAssetHeader_s* const setHdr = reinterpret_cast<SettingsAssetHeader_s*>(hdrLump.data);
+    // The dedi keeps the v1 header; the client runtime expects v2.
+    const bool clientHeader = !pak->IsFlagSet(PF_DEDI);
+    const size_t hdrSize = clientHeader ? sizeof(SettingsAssetHeader_v2_s) : sizeof(SettingsAssetHeader_s);
+#define STGS_HDR_OFFSET(field) (clientHeader ? offsetof(SettingsAssetHeader_v2_s, field) : offsetof(SettingsAssetHeader_s, field))
+
+    PakPageLump_s hdrLump = pak->CreatePageLump(hdrSize, SF_HEAD, 8);
+
+    // Fields are collected in the v1 shape and placed at the target offsets below.
+    SettingsAssetHeader_s scratchHdr{};
+    SettingsAssetHeader_s* const setHdr = &scratchHdr;
     const PakGuid_t layoutGuid = RTech::StringToGuid(layoutAssetPath);
 
     setHdr->settingsLayoutGuid = layoutGuid;
-    Pak_RegisterGuidRefAtOffset(layoutGuid, offsetof(SettingsAssetHeader_s, settingsLayoutGuid), hdrLump, asset);
+    memcpy(&hdrLump.data[STGS_HDR_OFFSET(settingsLayoutGuid)], &layoutGuid, sizeof(layoutGuid));
+    Pak_RegisterGuidRefAtOffset(layoutGuid, STGS_HDR_OFFSET(settingsLayoutGuid), hdrLump, asset);
 
     setHdr->uniqueId = JSON_GetNumberOrDefault(settings, "uniqueId", (uint32_t)0);
 
@@ -746,24 +756,32 @@ static void SettingsAsset_InternalAddSettingsAsset(CPakFileBuilder* const pak, c
 
     memcpy(&dataLump.data[assetNameOffset], assetPath, assetNameBufLen);
 
-    pak->AddPointer(hdrLump, offsetof(SettingsAssetHeader_s, valueData), dataLump, settingsMemory.valueBufIndex);
-    pak->AddPointer(hdrLump, offsetof(SettingsAssetHeader_s, name), dataLump, assetNameOffset);
+    pak->AddPointer(hdrLump, STGS_HDR_OFFSET(valueData), dataLump, settingsMemory.valueBufIndex);
+    pak->AddPointer(hdrLump, STGS_HDR_OFFSET(name), dataLump, assetNameOffset);
 
     const size_t stringBufferBase = settingsMemory.curStringBufIndex;
-    pak->AddPointer(hdrLump, offsetof(SettingsAssetHeader_s, stringData), dataLump, stringBufferBase);
+    pak->AddPointer(hdrLump, STGS_HDR_OFFSET(stringData), dataLump, stringBufferBase);
 
     SettingsAsset_WriteValues(layoutAsset, settingsAsset, settingsMemory, asset, pak, dataLump);
 
     if (hasMods)
     {
-        pak->AddPointer(hdrLump, offsetof(SettingsAssetHeader_s, modNames), dataLump, settingsMemory.curModNamesPtrBufIndex);
-        pak->AddPointer(hdrLump, offsetof(SettingsAssetHeader_s, modValues), dataLump, settingsMemory.curModValuesBufIndex);
+        pak->AddPointer(hdrLump, STGS_HDR_OFFSET(modNames), dataLump, settingsMemory.curModNamesPtrBufIndex);
+        pak->AddPointer(hdrLump, STGS_HDR_OFFSET(modValues), dataLump, settingsMemory.curModValuesBufIndex);
 
         SettingsAsset_WriteModNames(modCache, pak, settingsMemory, dataLump);
         SettingsAsset_WriteModValues(modCache, stringBufferBase, settingsMemory, dataLump);
     }
 
-    asset.InitAsset(hdrLump.GetPointer(), sizeof(SettingsAssetHeader_s), PagePtr_t::NullPtr(), STGS_VERSION, AssetType::STGS);
+    memcpy(&hdrLump.data[STGS_HDR_OFFSET(uniqueId)], &setHdr->uniqueId, sizeof(setHdr->uniqueId));
+    memcpy(&hdrLump.data[STGS_HDR_OFFSET(valueBufSize)], &setHdr->valueBufSize, sizeof(setHdr->valueBufSize));
+    memcpy(&hdrLump.data[STGS_HDR_OFFSET(modFlags)], &setHdr->modFlags, sizeof(setHdr->modFlags));
+    memcpy(&hdrLump.data[STGS_HDR_OFFSET(modNameCount)], &setHdr->modNameCount, sizeof(setHdr->modNameCount));
+    memcpy(&hdrLump.data[STGS_HDR_OFFSET(modValuesCount)], &setHdr->modValuesCount, sizeof(setHdr->modValuesCount));
+#undef STGS_HDR_OFFSET
+
+    asset.InitAsset(hdrLump.GetPointer(), static_cast<uint32_t>(hdrSize), PagePtr_t::NullPtr(),
+        clientHeader ? STGS_VERSION_CLIENT : STGS_VERSION, AssetType::STGS);
     asset.SetHeaderPointer(hdrLump.data);
 
     pak->FinishAsset();

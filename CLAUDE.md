@@ -27,6 +27,8 @@ repak -decompress <pak>
 - Build list: top-level `{ "paks": [ "a.json", "b.json" ], "dedi": true }`.
   `dedi` / `keepClientOnly` / `outputDir` are read from the **list**, not
   the per-pak file. Per-pak `assetsDir` is relative to the list’s directory.
+- Per-entry `$assetsDir` overrides the pak's `assetsDir` for that one file,
+  so one pak can merge entries from several asset trees.
 
 ## S21 writers (default)
 
@@ -40,6 +42,7 @@ repak -decompress <pak>
 | shds | 12 | VS/PS GUIDs @ 0x40 / 0x48 |
 | txtr | 10 | synth `$hdrTail` when streamed mips omit it |
 | txtx | 2 | raw container |
+| stgs | 2 | client header 80B (uniqueId @0x28); dedi builds write v1. Only `stgs -> stlt` refs are load-order dependencies; other guid refs are plain fixups |
 | uiia | 2 | raw `[hdr][tiles]`, not a decoded PNG |
 | rmap | 4 | 104B stub; geometry is in wrap/BSP |
 | wrap | 7 | BSP lump wrapper; align 64, 256 for lump `0x69` |

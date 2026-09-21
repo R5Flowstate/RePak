@@ -87,7 +87,15 @@ void CPakFileBuilder::AddJSONAsset(const PakAssetHandler_s& assetHandler, const 
 		const steady_clock::time_point start = high_resolution_clock::now();
 		const PakGuid_t assetGuid = Pak_GetGuidOverridable(file, assetPath);
 
+		// "$assetsDir" lets one pak merge entries that live in different asset trees.
+		const std::string savedAssetPath = m_assetPath;
+		const char* const assetsDirOverride = JSON_GetValueOrDefault(file, "$assetsDir", static_cast<const char*>(nullptr));
+
+		if (assetsDirOverride)
+			m_assetPath = assetsDirOverride;
+
 		targetFunc(this, assetGuid, assetPath, file);
+		m_assetPath = savedAssetPath;
 		const steady_clock::time_point stop = high_resolution_clock::now();
 
 		const microseconds duration = duration_cast<microseconds>(stop - start);
@@ -354,6 +362,30 @@ void CPakFileBuilder::WriteAssetDependents(BinaryIO& out)
 // purpose: counts the number of internal dependencies for each asset and sets
 // them dependent from another. internal dependencies reside in the same pak!
 //-----------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
+// purpose: a guid reference only becomes a load-order dependency when the
+// referencing asset's loader needs the target present. Settings only need
+// their layout; their other references (other settings, models, sequences,
+// effects, tables, images) resolve from the loaded-asset table, and counting
+// them would make a parent flavor and its children wait on each other.
+//-----------------------------------------------------------------------------
+static bool Pak_IsLoadOrderDependency(const PakAsset_t& user, const PakAsset_t& target)
+{
+	const uint32_t userType = static_cast<uint32_t>(user.id);
+	const uint32_t targetType = static_cast<uint32_t>(target.id);
+
+	if (userType == MAKE_FOURCC('s', 't', 'g', 's'))
+		return targetType == MAKE_FOURCC('s', 't', 'l', 't');
+
+	if (userType == MAKE_FOURCC('d', 't', 'b', 'l'))
+		return false;
+
+	if (userType == MAKE_FOURCC('a', 's', 'e', 'q') && targetType == MAKE_FOURCC('e', 'f', 'c', 't'))
+		return false;
+
+	return true;
+}
+
 void CPakFileBuilder::GenerateInternalDependencies()
 {
 	for (size_t i = 0; i < m_assets.size(); i++)
@@ -370,7 +402,7 @@ void CPakFileBuilder::GenerateInternalDependencies()
 
 			PakAsset_t* const dependency = GetAssetByGuid(ref.guid, nullptr, true);
 
-			if (dependency)
+			if (dependency && Pak_IsLoadOrderDependency(it, *dependency))
 			{
 				dependency->AddDependent(i);
 

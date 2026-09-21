@@ -12,6 +12,7 @@
 //#define DTBL_VERSION 1
 #define STLT_VERSION 0
 #define STGS_VERSION 1
+#define STGS_VERSION_CLIENT 2
 #define RMDL_VERSION 10
 #define RMDL_VERSION_V17 17 // S21-native model asset version (v16+ header family)
 #define ARIG_VERSION 4

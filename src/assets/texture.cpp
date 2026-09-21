@@ -594,7 +594,22 @@ static void Texture_InternalAddTexture_v10(CPakFileBuilder* const pak, const Pak
     // perm/strm/opt counts + type + compTypePacked/compressedBytes/unk metadata) for a
     // byte-exact 1:1 header; the structural fields [0x00..0x13] stay computed+validated.
     if (meta.hasTail)
+    {
         memcpy(reinterpret_cast<uint8_t*>(hdr) + TXTR_V10_TAIL_OFF, meta.hdrTail, sizeof(meta.hdrTail));
+
+        // Streamed mips are always written raw below, so a packed source tail
+        // would send the client a compressed-sized read through a decoder.
+        if (hdr->compTypePacked != 0 && (strmMips + optMips) > 0)
+        {
+            Warning("Texture \"%s\": source tail declares packed streamed mips (0x%04X); rewriting page table for raw mips.\n",
+                assetPath, hdr->compTypePacked);
+            hdr->compTypePacked = 0;
+            const unsigned int streamedCount = static_cast<unsigned int>(strmMips) + optMips;
+            const unsigned int n = streamedCount < 7u ? streamedCount : 7u;
+            for (unsigned int m = 0; m < n; m++)
+                hdr->compressedBytes[m] = static_cast<uint16_t>((mips[m].alignedSize - 1u) / 4096u);
+        }
+    }
     else if ((strmMips + optMips) > 0)
     {
         // +0x1B is minStreamableMipsToLoad. 0 underflows unsigned in the

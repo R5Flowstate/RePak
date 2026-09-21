@@ -65,6 +65,32 @@ struct SettingsAssetHeader_s
 };
 static_assert(sizeof(SettingsAssetHeader_s) == 72);
 
+// Client (S21) layout: eight reserved bytes sit between the string data and
+// the unique id. The runtime reads uniqueId at +0x28, so a v1 header loads
+// with a zero id on the client.
+struct SettingsAssetHeader_v2_s
+{
+	PakGuid_t settingsLayoutGuid;
+
+	void* valueData;
+	char* name;
+
+	char* stringData;
+	char reserved[8];
+
+	uint32_t uniqueId;
+	char padding[4];
+
+	const char** modNames;
+	SettingsMod_s* modValues;
+
+	uint32_t valueBufSize;
+	uint32_t modFlags;
+	uint32_t modNameCount;
+	uint32_t modValuesCount;
+};
+static_assert(sizeof(SettingsAssetHeader_v2_s) == 80);
+
 struct SettingsAsset_s
 {
 	const rapidjson::Value* value;
