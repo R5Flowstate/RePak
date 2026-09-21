@@ -1,29 +1,45 @@
 # RePak (R5Flowstate / S21)
 
 Builds Respawn RPak archives from JSON asset maps. This fork writes **Season 21
-native asset versions** for the cafe S21 client, plus a **dedi** path that
-routes models/anims to S3 versions. Upstream RePak / kral's RePak targeted
-Titanfall 2, R5Reloaded (S3), and R5Valkyrie.
+native asset versions** for the R5Flowstate S21 client, plus a **dedi** path
+that routes models and animations back to their S3 versions. Upstream RePak and
+kral's R5Valkyrie fork targeted Titanfall 2, R5Reloaded (S3) and R5Valkyrie.
 
-Upstream: [r-ex/RePak](https://github.com/r-ex/RePak).
+Upstream: [r-ex/RePak](https://github.com/r-ex/RePak), by way of kral's
+R5Valkyrie fork. Agents view included: CLAUDE.md.
 
 ## What this fork adds
 
 S21-native writers (what the S21 client actually loads):
 
-- mdl_ v17 (field-relative LOD groups; rewrite stale compressed VG offsets to
-  match raw streamed `.vg`)
-- aseq v11 / arig v6
-- matl v23, shdr v15, shds v12
-- txtr v10 (synthesizes `$hdrTail` when streamed mips omit it)
-- txtx v2, uiia v2, rmap v4, wrap, rui
-- efct v16 (24-byte header + baked ParticleDefinition blob + pointer replay)
+| 4cc | ver | notes |
+|-----|-----|-------|
+| mdl_ | 17 | field-relative LOD groups; stale compressed VG offsets rewritten to match the raw streamed `.vg` |
+| aseq | 11 | |
+| arig | 6 | |
+| matl | 23 | |
+| shdr | 15 | |
+| shds | 12 | |
+| txtr | 10 | synthesizes `$hdrTail` when streamed mips omit it |
+| txtx | 2 | |
+| uiia | 2 | |
+| rmap | 4 | |
+| wrap | 7 | |
+| efct | 16 | 24-byte header + baked ParticleDefinition blob + pointer replay |
+| rui | - | |
 
 Also:
 
-- Header pages are append-only (pak-load compaction cannot leave unpatched
-  descriptors).
-- `dedi` build-list flag: mdl_ / aseq / arig go out as S3 versions (v10 / v7 / v4).
+- `"dedi": true` on a build list emits mdl_ **v10**, aseq **v7** and arig **v4**
+  with zstd compression, skipping VG and materials.
+- Header pages are append-only, so pak-load compaction cannot leave unpatched
+  descriptors.
+- Per-entry `$assetsDir` lets one pak merge entries from several asset trees.
+- `tools/particle_uber/` converts newer-season particle material uber buffers
+  to the S21 layout.
+
+Asset order inside a manifest: models first, then
+dtbl / shdr / shds / txan / txtr / txtx / matl / aseq / arig / rmap / uiia.
 
 ## Table of Contents
 
@@ -42,8 +58,8 @@ Also:
 
 ## Introduction
 
-**RePak** converts JSON asset definitions into binary RPak files. This Cafe
-fork is the S21 packer for the cafe-r5sdk map and content pipeline.
+**RePak** converts JSON asset definitions into binary RPak files. This
+R5Flowstate fork is the S21 packer for the R5Flowstate map and content pipeline.
 
 ### Key Capabilities
 
@@ -67,21 +83,20 @@ RePak is a command-line tool that converts JSON-based asset definitions into bin
 
 ### Prerequisites
 
-- **CMake 3.20+** for building
-- **Visual Studio 2022** (Windows) or compatible C++ compiler
-- **Zstandard library** for compression support
+- **Visual Studio 2022** or newer with the C++ desktop workload
+- Zstandard, rapidjson and rapidcsv are vendored under `src/thirdparty/`
+- **Oodle** is not bundled; it is Epic Games Tools middleware. Supply the SDK
+  yourself in `src/thirdparty/oodle/`; see the note there.
 
 ### Building
 
-```bash
-git clone <repository-url>
+```
+git clone https://github.com/R5Flowstate/RePak.git
 cd RePak
-mkdir build && cd build
-cmake ..
-cmake --build . --config Release
+msbuild RePak.sln -p:Configuration=Release -p:Platform=x64
 ```
 
-The compiled binary will be located at `build/Release/repak.exe`
+The compiled binary will be located at `bin/Release/repak.exe`
 
 ## repak Usage
 
@@ -172,7 +187,9 @@ Repak can build multiple Respawn paks from single json file using this format:
 
 ## Asset Types Reference
 
-RePak supports **17+ asset types**, each with specific JSON schemas:
+RePak supports **17+ asset types**, each with specific JSON schemas. The
+versions below are the upstream ones; for the S21 versions this fork writes see
+[What this fork adds](#what-this-fork-adds).
 
 | Type ID | Name | Description | Version Support |
 |---------|------|-------------|-----------------|
@@ -445,9 +462,7 @@ RePak automatically tracks dependencies:
 ```
 
 
-## R5Valkyrie Specific Notes
-
-
+## Inherited from R5Valkyrie
 
 ### Supported Shader Types
 
@@ -463,4 +478,5 @@ This version includes additional material types:
 
 ---
 
-Maintained by LorryleKral
+Maintained by [R5Flowstate](https://github.com/R5Flowstate).
+Based on kral's R5Valkyrie fork of [r-ex/RePak](https://github.com/r-ex/RePak).
