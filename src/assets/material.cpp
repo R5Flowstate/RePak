@@ -362,7 +362,7 @@ static void Material_AddUberData(CPakFileBuilder* const pak, MaterialAsset_t* co
             const MaterialShaderType_e t = matlAsset->materialType;
             if ((t == PTCU || t == PTCS) && staticBufSize == 240)
             {
-                Error("Particle uber \"%s\" is 240 bytes (S30). S21 PTCU/PTCS is 144. Convert before packing.\n",
+                Error("Particle uber \"%s\" is 240 bytes (newer season). S21 PTCU/PTCS is 144. Run tools/particle_uber/convert_particle_uber.py first.\n",
                     uberPath.c_str());
             }
             if ((t == SKNU || t == SKNP || t == SKNC) && staticBufSize == 512)
