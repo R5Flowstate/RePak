@@ -6,7 +6,7 @@ that routes models and animations back to their S3 versions. Upstream RePak and
 kral's R5Valkyrie fork targeted Titanfall 2, R5Reloaded (S3) and R5Valkyrie.
 
 Upstream: [r-ex/RePak](https://github.com/r-ex/RePak), by way of kral's
-R5Valkyrie fork. Agents view included: CLAUDE.md.
+R5Valkyrie fork. Agents view included: AGENTS.md.
 
 ## What this fork adds
 
