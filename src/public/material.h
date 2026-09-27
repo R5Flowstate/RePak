@@ -554,13 +554,10 @@ struct __declspec(align(16)) MaterialAssetHeader_v15_t
 };
 static_assert(sizeof(MaterialAssetHeader_v15_t) == 256);
 
-// S21-native material header (matl v23). Same 256B v15-FAMILY size, but the 0x90-0xFF region
-// DIFFERS from S3 v15: v23 has ONE dxState (0x90-0xBF) followed by a params block, where v15 had
-// dxStates[2] (0x90-0xEF). Mapped from the shipping mp_rr_district across 5197 materials: materialType
-// moved 0xF2 -> 0xCA (0xCA holds the real MaterialShaderType_e; 0xF2 is always 0), textureAnimation
-// 0xF8 -> 0xD0, plus a float param @0xE8 (1.0 default). Writing the v15 layout for a v23 material
-// put materialType=0 (RGDU) -> wrong shader -> render AV 0x4E5DEB, and textureAnimation@0xF8 ->
-// guidDesc mismatch. The 0x00-0x8F region is identical to v15.
+// S21 material header (matl v23): 256 bytes like v15, and 0x00-0x8F is identical. From 0x90,
+// v23 has one dxState (0x90-0xBF) and a params block where v15 had dxStates[2] (0x90-0xEF):
+// materialType sits at 0xCA (0xF2 in v15), textureAnimation at 0xD0 (0xF8), plus a float
+// param at 0xE8 (1.0 default).
 struct __declspec(align(16)) MaterialAssetHeader_v23_t
 {
 	uint64_t vftableReserved;
@@ -735,9 +732,8 @@ struct MaterialAsset_t
 			matl->dxState.depthStencilFlags = this->dxStates[0].depthStencilFlags;
 			matl->dxState.rasterizerFlags = this->dxStates[0].rasterizerFlags;
 
-			// byte-1:1 v23 params (raw bits from the RSX json). dxState @0x28 (material 0xB8-0xBF),
-			// then 0xC0-0xC7, 0xCC, 0xE8 (float), 0xEC. Previously these were 0/hardcoded -> wrong
-			// shader param block -> NULL shader binding -> render AV 0x4E5DEB.
+			// v23 params, raw bits from the RSX json: dxState +0x28 (material 0xB8-0xBF), then
+			// 0xC0-0xC7, 0xCC, 0xE8 (float), 0xEC. The shader binding depends on them.
 			memcpy(matl->dxState.unk_28, this->dxStates[0].unk_28, sizeof(matl->dxState.unk_28));
 			memcpy(&matl->unk_C0, &this->v23_unk_C0, sizeof(this->v23_unk_C0)); // unk_C0 + unk_C4
 			matl->unk_CC = this->v23_unk_CC;

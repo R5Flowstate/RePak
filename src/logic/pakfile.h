@@ -70,6 +70,7 @@ public:
 	int64_t AddStreamingFileReference(const char* const path, const bool mandatory);
 
 	PakStreamSetEntry_s AddStreamingDataEntry(const int64_t size, const uint8_t* const data, const PakStreamSet_e set);
+	bool IsOptionalStreamVirtual() const;
 	bool TryReuseStreaming(const PakGuid_t guid, PakStreamSetEntry_s* const mand, PakStreamSetEntry_s* const opt);
 
 	//----------------------------------------------------------------------------

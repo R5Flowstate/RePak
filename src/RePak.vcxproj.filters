@@ -261,6 +261,9 @@
     <ClCompile Include="assets\rson.cpp">
       <Filter>assets</Filter>
     </ClCompile>
+    <ClCompile Include="assets\weapon_definition.cpp">
+      <Filter>assets</Filter>
+    </ClCompile>
     <ClCompile Include="assets\wrap.cpp">
       <Filter>assets</Filter>
     </ClCompile>
@@ -642,6 +645,9 @@
       <Filter>public</Filter>
     </ClInclude>
     <ClInclude Include="public\rson.h">
+      <Filter>public</Filter>
+    </ClInclude>
+    <ClInclude Include="public\weapon_definition.h">
       <Filter>public</Filter>
     </ClInclude>
     <ClInclude Include="public\wrap.h">

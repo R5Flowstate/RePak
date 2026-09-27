@@ -49,6 +49,8 @@
 #define TYPE_WRAP	MAKE_FOURCC('w', 'r', 'a', 'p') // wrap
 #define TYPE_RMAP	MAKE_FOURCC('r', 'm', 'a', 'p') // rmap
 #define TYPE_EFCT	MAKE_FOURCC('e', 'f', 'c', 't') // efct
+#define TYPE_WEPN	MAKE_FOURCC('w', 'e', 'p', 'n') // wepn
+#define TYPE_IMPA	MAKE_FOURCC('i', 'm', 'p', 'a') // impa
 
 enum class AssetType : uint32_t
 {
@@ -78,7 +80,9 @@ enum class AssetType : uint32_t
 	UI   = TYPE_UI,   // ui
 	WRAP = TYPE_WRAP, // wrapped raw file
 	RMAP = TYPE_RMAP, // map asset
-	EFCT = TYPE_EFCT  // particle effect
+	EFCT = TYPE_EFCT, // particle effect
+	WEPN = TYPE_WEPN, // weapon definition
+	IMPA = TYPE_IMPA  // impact table
 };
 
 #pragma pack(push, 1)

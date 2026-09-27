@@ -20,11 +20,13 @@ static void AnimRecording_ParseFromANIR(const char* const assetPath, BinaryIO& b
 	if (hdr.fileVersion != ANIR_FILE_VERSION)
 		Error("Attempted to load an unsupported animation recording file (expected file version %x, got %x).\n", ANIR_FILE_VERSION, hdr.fileVersion);
 
-	if (hdr.assetVersion != ANIR_VERSION)
-		Error("Attempted to load an unsupported animation recording file (expected asset version %x, got %x).\n", ANIR_VERSION, hdr.assetVersion);
+	if (hdr.assetVersion != 1 && hdr.assetVersion != 2)
+		Error("Attempted to load an unsupported animation recording file (expected asset version 1 or 2, got %x).\n", hdr.assetVersion);
 
-	if (hdr.numElements > ANIR_MAX_ELEMENTS)
-		Error("Animation recording file \"%s\" has too many elements (max %d, got %d).\n", assetPath, ANIR_MAX_ELEMENTS, hdr.numElements);
+	const int maxElements = hdr.assetVersion == 1 ? ANIR_MAX_ELEMENTS_V1 : ANIR_MAX_ELEMENTS_V2;
+
+	if (hdr.numElements > maxElements)
+		Error("Animation recording file \"%s\" has too many elements (max %d, got %d).\n", assetPath, maxElements, hdr.numElements);
 
 	if (hdr.numSequences > ANIR_MAX_SEQUENCES)
 		Error("Animation recording file \"%s\" has too many sequences (max %d, got %d).\n", assetPath, ANIR_MAX_SEQUENCES, hdr.numSequences);
@@ -50,19 +52,14 @@ static void AnimRecording_ParseFromANIR(const char* const assetPath, BinaryIO& b
 // page chunk structure and order:
 // - header HEAD        (align=8)
 // - data   CPU         (align=4)
-static void AnimRecording_InternalAddAnimRecording(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath)
+template <typename Header>
+static void AnimRecording_InternalAddAnimRecording(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath,
+	BinaryIO& bio, const AnimRecordingFileHeader_s& fileHdr, const size_t cpuBufSize)
 {
-	const std::string anirPath = Utils::ChangeExtension(pak->GetAssetPath() + assetPath, "anir");
-
-	BinaryIO bio;
-	AnimRecordingFileHeader_s fileHdr; size_t cpuBufSize;
-
-	AnimRecording_ParseFromANIR(anirPath.c_str(), bio, fileHdr, cpuBufSize);
-
 	PakAsset_t& asset = pak->BeginAsset(assetGuid, assetPath);
 
-	PakPageLump_s hdrLump = pak->CreatePageLump(sizeof(AnimRecordingAssetHeader_s), SF_HEAD | SF_SERVER, 8);
-	AnimRecordingAssetHeader_s* const pHdr = reinterpret_cast<AnimRecordingAssetHeader_s*>(hdrLump.data);
+	PakPageLump_s hdrLump = pak->CreatePageLump(sizeof(Header), SF_HEAD | SF_SERVER, 8);
+	Header* const pHdr = reinterpret_cast<Header*>(hdrLump.data);
 
 	pHdr->startPos = fileHdr.startPos;
 	pHdr->startAngles = fileHdr.startAngles;
@@ -95,7 +92,7 @@ static void AnimRecording_InternalAddAnimRecording(CPakFileBuilder* const pak, c
 		const size_t stringBufLen = poseParamName.length() + 1;
 		memcpy(&cpuLump.data[cpuBufIt], poseParamName.c_str(), stringBufLen);
 
-		pak->AddPointer(hdrLump, offsetof(AnimRecordingAssetHeader_s, poseParamNames) + i * sizeof(PagePtr_t), cpuLump, cpuBufIt);
+		pak->AddPointer(hdrLump, offsetof(Header, poseParamNames) + i * sizeof(PagePtr_t), cpuLump, cpuBufIt);
 		cpuBufIt += stringBufLen;
 	}
 
@@ -114,7 +111,7 @@ static void AnimRecording_InternalAddAnimRecording(CPakFileBuilder* const pak, c
 		const size_t stringBufLen = sequenceName.length() + 1;
 		memcpy(&cpuLump.data[cpuBufIt], sequenceName.c_str(), stringBufLen);
 
-		pak->AddPointer(hdrLump, offsetof(AnimRecordingAssetHeader_s, animSequences) + i * sizeof(PagePtr_t), cpuLump, cpuBufIt);
+		pak->AddPointer(hdrLump, offsetof(Header, animSequences) + i * sizeof(PagePtr_t), cpuLump, cpuBufIt);
 		cpuBufIt += stringBufLen;
 	}
 
@@ -122,7 +119,7 @@ static void AnimRecording_InternalAddAnimRecording(CPakFileBuilder* const pak, c
 	// to 4 bytes, so align the current buffer iterator out. The extra size taken
 	// by this alignment is being accounted for in AnimRecording_ParseFromANIR().
 	cpuBufIt = IALIGN4(cpuBufIt);
-	pak->AddPointer(hdrLump, offsetof(AnimRecordingAssetHeader_s, recordedFrames), cpuLump, cpuBufIt);
+	pak->AddPointer(hdrLump, offsetof(Header, recordedFrames), cpuLump, cpuBufIt);
 
 	for (int i = 0; i < fileHdr.numRecordedFrames; i++)
 	{
@@ -132,7 +129,7 @@ static void AnimRecording_InternalAddAnimRecording(CPakFileBuilder* const pak, c
 
 	if (fileHdr.numRecordedOverlays > 0)
 	{
-		pak->AddPointer(hdrLump, offsetof(AnimRecordingAssetHeader_s, recordedOverlays), cpuLump, cpuBufIt);
+		pak->AddPointer(hdrLump, offsetof(Header, recordedOverlays), cpuLump, cpuBufIt);
 
 		for (int i = 0; i < fileHdr.numRecordedOverlays; i++)
 		{
@@ -141,13 +138,24 @@ static void AnimRecording_InternalAddAnimRecording(CPakFileBuilder* const pak, c
 		}
 	}
 
-	asset.InitAsset(hdrLump.GetPointer(), sizeof(AnimRecordingAssetHeader_s), PagePtr_t::NullPtr(), ANIR_VERSION, AssetType::ANIR);
+	asset.InitAsset(hdrLump.GetPointer(), sizeof(Header), PagePtr_t::NullPtr(), fileHdr.assetVersion, AssetType::ANIR);
 	asset.SetHeaderPointer(hdrLump.data);
 
 	pak->FinishAsset();
 }
 
+// The .anir file records its asset version, so one handler writes both layouts.
 void Assets::AddAnimRecording_v1(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& /*mapEntry*/)
 {
-	AnimRecording_InternalAddAnimRecording(pak, assetGuid, assetPath);
+	const std::string anirPath = Utils::ChangeExtension(pak->GetAssetPath() + assetPath, "anir");
+
+	BinaryIO bio;
+	AnimRecordingFileHeader_s fileHdr; size_t cpuBufSize;
+
+	AnimRecording_ParseFromANIR(anirPath.c_str(), bio, fileHdr, cpuBufSize);
+
+	if (fileHdr.assetVersion == 1)
+		AnimRecording_InternalAddAnimRecording<AnimRecordingAssetHeader_v1_s>(pak, assetGuid, assetPath, bio, fileHdr, cpuBufSize);
+	else
+		AnimRecording_InternalAddAnimRecording<AnimRecordingAssetHeader_v2_s>(pak, assetGuid, assetPath, bio, fileHdr, cpuBufSize);
 }

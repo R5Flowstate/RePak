@@ -13,23 +13,39 @@ enum AseqDependencyType_e : uint8_t
     ASEQ_DEP_COUNT // Not a type!
 };
 
-static void AnimSeq_ClassifyAndAddDependency(const char* const dependency, std::set<PakGuid_t>(&dependencies)[ASEQ_DEP_COUNT])
+// Unnamed assets are exported as "<type>/0x<guid>"; hashing that string would name
+// an asset that does not exist.
+static PakGuid_t AnimSeq_GuidFromDependencyName(const char* const dependency)
 {
-    const PakGuid_t guid = RTech::StringToGuid(dependency);
+    const char* const slash = strrchr(dependency, '/');
+    const char* const tail = slash ? slash + 1 : dependency;
+
+    // Exporters drop leading zeros, so accept 1-16 digits.
+    const size_t digits = tail[0] == '0' && (tail[1] == 'x' || tail[1] == 'X') ? strlen(tail + 2) : 0;
+    if (digits >= 1 && digits <= 16 && strspn(tail + 2, "0123456789abcdefABCDEF") == digits)
+        return strtoull(tail + 2, nullptr, 16);
+
+    return RTech::StringToGuid(dependency);
+}
+
+static AseqDependencyType_e AnimSeq_ClassifyDependency(const char* const dependency)
+{
     const uint32_t ident = (dependency[2] << 16) + (dependency[1] << 8) + dependency[0];
 
     switch (ident)
     {
     case 'tes': // set (settings).
-        dependencies[ASEQ_DEP_SETTINGS].insert(guid);
-        break;
+        return ASEQ_DEP_SETTINGS;
     case 'ldm': // mdl (models).
-        dependencies[ASEQ_DEP_MODEL].insert(guid);
-        break;
+        return ASEQ_DEP_MODEL;
     default: // aseq, efct, etc...
-        dependencies[ASEQ_DEP_GENERIC].insert(guid);
-        break;
+        return ASEQ_DEP_GENERIC;
     }
+}
+
+static void AnimSeq_ClassifyAndAddDependency(const char* const dependency, std::set<PakGuid_t>(&dependencies)[ASEQ_DEP_COUNT])
+{
+    dependencies[AnimSeq_ClassifyDependency(dependency)].insert(AnimSeq_GuidFromDependencyName(dependency));
 }
 
 // This parses all dependencies from the animation data itself, currently the
@@ -133,6 +149,51 @@ static void AnimSeq_ParseDependenciesFromMap(CPakFileBuilder* const pak, const c
             }
         }
     }
+}
+
+// v11 guid arrays carry no element count for effects, so the stock list is
+// reproduced exactly: order and repeats preserved. Returns false without a list.
+static bool AnimSeq_ParseOrderedDependenciesFromMap(CPakFileBuilder* const pak, const char* const assetPath,
+    std::vector<PakGuid_t>(&dependencies)[ASEQ_DEP_COUNT])
+{
+    const std::string metaFilePath = Utils::ChangeExtension(pak->GetAssetPath() + assetPath, ".json");
+    rapidjson::Document document;
+
+    if (!JSON_ParseFromFile(metaFilePath.c_str(), "animation metadata", document, false))
+        return false;
+
+    rapidjson::Value::ConstMemberIterator dependenciesIt;
+
+    if (!JSON_GetIterator(document, "dependencies", JSONFieldType_e::kArray, dependenciesIt) || dependenciesIt->value.Empty())
+        return false;
+
+    int depIndex = -1;
+    for (const auto& dependency : dependenciesIt->value.GetArray())
+    {
+        depIndex++;
+
+        if (dependency.IsString())
+        {
+            if (dependency.GetStringLength() < ASEQ_DEPENDENCY_MIN_STR_LEN)
+            {
+                Warning("Listed animation sequence dependency #%i has a name that is too short! [%zu < %zu]\n",
+                    depIndex, (size_t)dependency.GetStringLength(), (size_t)ASEQ_DEPENDENCY_MIN_STR_LEN);
+                continue;
+            }
+
+            const char* const name = dependency.GetString();
+            dependencies[AnimSeq_ClassifyDependency(name)].push_back(AnimSeq_GuidFromDependencyName(name));
+        }
+        else
+        {
+            PakGuid_t guid;
+
+            if (JSON_ParseNumber(dependency, guid))
+                dependencies[ASEQ_DEP_GENERIC].push_back(guid);
+        }
+    }
+
+    return true;
 }
 
 // page chunk structure and order:
@@ -332,13 +393,23 @@ static void AnimSeq_InternalAddAnimSeq_v11(CPakFileBuilder* const pak, const Pak
     AnimSeqAssetHeader_v11_t* const hdr = reinterpret_cast<AnimSeqAssetHeader_v11_t*>(hdrLump.data);
 
     const size_t rseqFileSize = rseqInput.GetSize();
+    if (rseqFileSize < sizeof(mstudioseqdesc_v16_t))
+        Error("Animseq \"%s\" is %zu bytes; too small for a sequence descriptor.\n", assetPath, rseqFileSize);
+
     uint8_t* const tempAseqBuf = static_cast<uint8_t*>(GetGlobalScratch().Allocate(rseqFileSize));
     rseqInput.Read(tempAseqBuf, rseqFileSize);
     rseqInput.Close();
 
-    std::set<PakGuid_t> dependencies[ASEQ_DEP_COUNT];
-    AnimSeq_ParseDependenciesFromData_v16(tempAseqBuf, dependencies);
-    AnimSeq_ParseDependenciesFromMap(pak, assetPath, dependencies);
+    std::vector<PakGuid_t> dependencies[ASEQ_DEP_COUNT];
+
+    if (!AnimSeq_ParseOrderedDependenciesFromMap(pak, assetPath, dependencies))
+    {
+        std::set<PakGuid_t> scanned[ASEQ_DEP_COUNT];
+        AnimSeq_ParseDependenciesFromData_v16(tempAseqBuf, scanned);
+
+        for (size_t i = 0; i < ASEQ_DEP_COUNT; i++)
+            dependencies[i].assign(scanned[i].begin(), scanned[i].end());
+    }
 
     const size_t numDependencies = dependencies[ASEQ_DEP_GENERIC].size() + dependencies[ASEQ_DEP_MODEL].size() + dependencies[ASEQ_DEP_SETTINGS].size();
     const size_t dependenciesBufSize = numDependencies * sizeof(PakGuid_t);
@@ -347,10 +418,13 @@ static void AnimSeq_InternalAddAnimSeq_v11(CPakFileBuilder* const pak, const Pak
     PakPageLump_s dataLump = pak->CreatePageLump((dependenciesBufSize + rseqNameBufLen + rseqFileSize), SF_CPU, numDependencies > 0 ? 8 : 1);
     asset.ExpandGuidBuf(numDependencies);
 
+    // Stock layout: prop models, then effects, then anim window settings.
+    constexpr AseqDependencyType_e writeOrder[ASEQ_DEP_COUNT] = { ASEQ_DEP_MODEL, ASEQ_DEP_GENERIC, ASEQ_DEP_SETTINGS };
+
     size_t bufferBase = 0;
-    for (size_t i = 0; i < ASEQ_DEP_COUNT; i++)
+    for (const AseqDependencyType_e i : writeOrder)
     {
-        const std::set<PakGuid_t>& set = dependencies[i];
+        const std::vector<PakGuid_t>& set = dependencies[i];
         if (set.empty())
             continue;
 
@@ -371,10 +445,7 @@ static void AnimSeq_InternalAddAnimSeq_v11(CPakFileBuilder* const pak, const Pak
 
         for (size_t j = 0; j < set.size(); j++)
         {
-            std::set<PakGuid_t>::iterator it = set.begin();
-            std::advance(it, j);
-
-            const PakGuid_t guidToCopy = *it;
+            const PakGuid_t guidToCopy = set[j];
             reinterpret_cast<PakGuid_t*>(&dataLump.data[bufferBase])[j] = guidToCopy;
             Pak_RegisterGuidRefAtOffset(guidToCopy, bufferBase + (j * sizeof(PakGuid_t)), dataLump, asset);
         }

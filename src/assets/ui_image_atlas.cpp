@@ -610,7 +610,34 @@ void Assets::AddUIImageAtlasAsset_v2(CPakFileBuilder* const pak, const PakGuid_t
     }
     bio.Close();
 
-    asset.InitAsset(hdrLump.GetPointer(), UIIA_V2_HEADER_SIZE, rawDataPtr, UIIA_VERSION_V2, AssetType::UIIA);
+    // Optional "<asset>.hi" sidecar: the full-resolution tiles, streamed from the
+    // mandatory starpak. The rpak then only carries the low-res copy, and the
+    // header's streamedSize (in 4 KB pages) must already match the sidecar.
+    PakStreamSetEntry_s streamEntry;
+    const std::string hiPath = filePath + ".hi";
+
+    if (std::filesystem::exists(hiPath))
+    {
+        BinaryIO hiIo;
+        if (!hiIo.Open(hiPath, BinaryIO::Mode_e::Read))
+            Error("Failed to open uiia streamed data \"%s\".\n", hiPath.c_str());
+
+        const size_t hiSize = hiIo.GetSize();
+        const size_t hiAligned = IALIGN(hiSize, STARPAK_DATABLOCK_ALIGNMENT);
+        const uint16_t streamedPages = *reinterpret_cast<const uint16_t*>(&hdrLump.data[0x10]);
+
+        if (hiSize == 0 || hiAligned / STARPAK_DATABLOCK_ALIGNMENT != streamedPages)
+            Error("uiia \"%s\" streamed data is %zu bytes but the header declares %u pages.\n", assetPath, hiSize, streamedPages);
+
+        std::vector<uint8_t> hiData(hiAligned, 0);
+        hiIo.Read(hiData.data(), hiSize);
+        hiIo.Close();
+
+        streamEntry = pak->AddStreamingDataEntry(hiAligned, hiData.data(), STREAMING_SET_MANDATORY);
+    }
+
+    asset.InitAsset(hdrLump.GetPointer(), UIIA_V2_HEADER_SIZE, rawDataPtr, UIIA_VERSION_V2, AssetType::UIIA,
+        streamEntry.streamOffset, streamEntry.streamIndex);
     asset.SetHeaderPointer(hdrLump.data);
 
     pak->FinishAsset();

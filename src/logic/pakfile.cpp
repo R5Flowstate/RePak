@@ -37,6 +37,8 @@ static std::unordered_set<PakAssetHandler_s, PakAssetHasher_s> s_pakAssetHandler
 	{"txls", PakAssetScope_e::kAll, nullptr, Assets::AddTextureListAsset_v1},
 	{"txtx", PakAssetScope_e::kAll, nullptr, Assets::AddTextureExtraAsset_v2},
 	{"rson", PakAssetScope_e::kAll, nullptr, Assets::AddRSONAsset_v1},
+	{"wepn", PakAssetScope_e::kAll, nullptr, Assets::AddWeaponDefinitionAsset_v1},
+	{"impa", PakAssetScope_e::kAll, nullptr, Assets::AddImpactAsset_v1},
 	{"Ptch", PakAssetScope_e::kAll, Assets::AddPatchAsset, Assets::AddPatchAsset},
 	{"ui", PakAssetScope_e::kClientOnly, Assets::AddRuiAsset_v30, Assets::AddRuiAsset_v30},
 	{"font", PakAssetScope_e::kClientOnly, Assets::AddFontAtlasAsset_v7, Assets::AddFontAtlasAsset_v7},
@@ -212,6 +214,11 @@ PakStreamSetEntry_s CPakFileBuilder::AddStreamingDataEntry(const int64_t size, c
 	block.streamIndex = AddStreamingFileReference(results.streamFile, set == STREAMING_SET_MANDATORY);
 
 	return block;
+}
+
+bool CPakFileBuilder::IsOptionalStreamVirtual() const
+{
+	return m_streamBuilder && m_streamBuilder->IsOptionalVirtual();
 }
 
 void CPakFileBuilder::SetVersion(const uint16_t version)

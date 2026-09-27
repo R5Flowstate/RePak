@@ -378,7 +378,9 @@ static void SettingsLayout_ParseTable(CPakFileBuilder* const pak, const char* co
     if (!datatableStream.is_open())
         Error("Failed to open settings layout table \"%s\".\n", settingsLayoutFile.c_str());
 
-    rapidcsv::Document document(datatableStream);
+    // Stock help texts carry line breaks inside quoted fields.
+    rapidcsv::Document document(datatableStream, rapidcsv::LabelParams(),
+        rapidcsv::SeparatorParams(',', false, rapidcsv::sPlatformHasCR, true));
     const size_t columnCount = document.GetColumnCount();
 
     // Rows: fieldName, dataType, layoutIndex, helpText.

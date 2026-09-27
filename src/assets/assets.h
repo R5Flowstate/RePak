@@ -3,7 +3,6 @@
 
 // asset versions
 #define PTCH_VERSION 1
-#define ANIR_VERSION 1
 #define TXTR_VERSION 8
 #define TXAN_VERSION 1
 #define TXLS_VERSION 1
@@ -27,6 +26,8 @@
 #define MATL_VERSION 15
 #define MT4A_VERSION 3
 #define RSON_VERSION 1
+#define WEPN_VERSION 1
+#define IMPA_VERSION 1
 #define FONT_VERSION 7
 #define WRAP_VERSION 7
 #define EFCT_VERSION_V16 16 // S21-native particle effect (24-byte GUID-reference-graph subheader)
@@ -75,6 +76,8 @@ namespace Assets
 	void AddShaderAsset_v15(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry);
 
 	void AddRSONAsset_v1(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry);
+	void AddWeaponDefinitionAsset_v1(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry);
+	void AddImpactAsset_v1(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry);
 
 	void AddRuiAsset_v30(CPakFileBuilder* const pak, const PakGuid_t assetGuid, const char* const assetPath, const rapidjson::Value& mapEntry);
 

@@ -494,10 +494,8 @@ struct mstudiotexture_v16_t
 
 // Per-LOD-group streaming descriptor inside a v17 studiohdr's groupHeaderOffset table.
 // The S21 client walks this table with a 16-byte stride.
-// rmdlconv's own copy of this struct (studio_r5_v16.h/v19.h) declares dataCompression
-// as a 4-byte int, making it 20 bytes -- that definition is wrong; it is never used to
-// reinterpret table entries (rmdlconv only byte-copies the region), so it never corrupted
-// output, but do NOT reuse it as a reference for this struct.
+// rmdlconv's copy (studio_r5_v16.h/v19.h) declares dataCompression as a 4-byte int
+// (20 bytes); it only byte-copies the region, so do not use it as a layout reference.
 struct studio_hw_groupdata_t
 {
 	int dataOffset;				// +0x00 offset into the model's streamed .vg data

@@ -266,7 +266,8 @@ static void DataTable_AddDataTable(CPakFileBuilder* const pak, const PakGuid_t a
 
     const size_t rowCount = doc.GetRowCount();
 
-    if (rowCount < 2)
+    // A types row alone is a valid empty table; stock paks ship several.
+    if (rowCount < 1)
     {
         Error("Attempted to add datatable with invalid row count %zu.\nDTBL    - CSV must have a row of column types at the end of the table.\n", rowCount);
         return;

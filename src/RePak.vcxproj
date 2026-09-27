@@ -35,6 +35,7 @@
     <ClCompile Include="assets\ui_image_atlas.cpp" />
     <ClCompile Include="assets\ui.cpp" />
     <ClCompile Include="assets\rson.cpp" />
+    <ClCompile Include="assets\weapon_definition.cpp" />
     <ClCompile Include="assets\ui_font_atlas.cpp" />
     <ClCompile Include="assets\wrap.cpp" />
     <ClCompile Include="logic\buildsettings.cpp" />
@@ -205,6 +206,7 @@
     <ClInclude Include="public\material_for_aspect.h" />
     <ClInclude Include="public\multishader.h" />
     <ClInclude Include="public\rson.h" />
+    <ClInclude Include="public\weapon_definition.h" />
     <ClInclude Include="public\rpak.h" />
     <ClInclude Include="public\ui.h" />
     <ClInclude Include="public\ui_font_atlas.h" />

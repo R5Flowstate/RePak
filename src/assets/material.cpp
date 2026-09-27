@@ -349,8 +349,9 @@ static void Material_AddUberData(CPakFileBuilder* const pak, MaterialAsset_t* co
     if (uberFile.Open(uberPath, BinaryIO::Mode_e::Read))
     {
         const size_t fileSize = static_cast<size_t>(uberFile.GetSize());
-        if (fileSize == 0 || fileSize > 1024)
-            Error("Uber \"%s\" is %zu bytes; expected 1..1024.\n", uberPath.c_str(), fileSize);
+        // Stock debug and virtual-texture materials carry an empty static buffer.
+        if (fileSize > 1024)
+            Error("Uber \"%s\" is %zu bytes; expected 0..1024.\n", uberPath.c_str(), fileSize);
 
         uint8_t uberBytes[1024];
         memset(uberBytes, 0, sizeof(uberBytes));

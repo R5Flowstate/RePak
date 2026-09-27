@@ -34,6 +34,14 @@ void CStreamFileBuilder::Init(const js::Document& doc, const bool useOptional)
 	{
 		m_optionalStreamFileName.assign(optionalIt->value.GetString(), optionalIt->value.GetStringLength());
 		Utils::FixSlashes(m_optionalStreamFileName);
+
+		// The rpak references the optional starpak exactly as a full build would, but its
+		// data is neither read nor written; the engine skips a missing optional starpak.
+		m_optionalVirtual = JSON_GetValueOrDefault(doc, "streamFileOptionalVirtual", false);
+
+		if (m_optionalVirtual)
+			Log("Optional streaming file \"%s\" is virtual: offsets are laid out, no data is written.\n",
+				m_optionalStreamFileName.c_str());
 	}
 
 	rapidjson::Value::ConstMemberIterator streamCacheIt;
@@ -242,6 +250,23 @@ bool CStreamFileBuilder::AddStreamingDataEntry(const int64_t size, const uint8_t
 {
 	const bool isMandatory = set == STREAMING_SET_MANDATORY;
 	const std::string& newStarPak = isMandatory ? m_mandatoryStreamFileName : m_optionalStreamFileName;
+
+	if (!isMandatory && m_optionalVirtual)
+	{
+		// Same placement a real write would get: 4096-aligned, back to back after the header.
+		const int64_t dataOffset = IALIGN(m_optionalVirtualCursor, (int64_t)STARPAK_DATABLOCK_ALIGNMENT);
+		const int64_t paddedSize = IALIGN(size, STARPAK_DATABLOCK_ALIGNMENT);
+		m_optionalVirtualCursor = dataOffset + paddedSize;
+
+		PakStreamSetAssetEntry_s& desc = m_optionalStreamingDataBlocks.emplace_back();
+		desc.offset = dataOffset;
+		desc.size = paddedSize;
+
+		outResults.streamFile = newStarPak.c_str();
+		outResults.pathIndex = 0;
+		outResults.dataOffset = dataOffset;
+		return true;
+	}
 
 	StreamCacheFindParams_s params = m_streamCache.CreateParams(data, size, newStarPak.c_str());
 	StreamCacheFindResult_s result;

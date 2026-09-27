@@ -639,6 +639,10 @@ static void Texture_InternalAddTexture_v10(CPakFileBuilder* const pak, const Pak
             streamedSize += static_cast<size_t>(mips[m].alignedSize) * arraySize;
 
         const size_t pageAligned = IALIGN(streamedSize, STARPAK_DATABLOCK_ALIGNMENT);
+
+        if (set == STREAMING_SET_OPTIONAL && pak->IsOptionalStreamVirtual())
+            return pak->AddStreamingDataEntry(pageAligned, nullptr, set);
+
         char* const sbuf = new char[pageAligned](); // zero-init (per-mip padding + page tail = zeros, matches kral)
 
         char* pCur = sbuf;
@@ -711,8 +715,7 @@ bool Texture_AutoAddTexture(CPakFileBuilder* const pak, const PakGuid_t assetGui
 
     Debug("Auto-adding 'txtr' asset \"%s\".\n", assetPath);
 
-    // S21 (pak v8, non-dedi) must use the v10 writer. Material auto-add used to
-    // call Texture_InternalAddTexture (v8) and ship txtr v8 that AVs on S21 load.
+    // S21 (pak v8, non-dedi) loads only the v10 texture layout.
     if (pak->GetVersion() >= 8 && !pak->IsFlagSet(PF_DEDI))
     {
         TextureV10Meta_s meta{};

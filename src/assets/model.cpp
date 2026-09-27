@@ -616,6 +616,26 @@ void Assets::AddModelAsset_v17(CPakFileBuilder* const pak, const PakGuid_t asset
     const bool hasMaterialOverrides = JSON_GetIterator(mapEntry, "$materials", JSONFieldType_e::kArray, materialsIt);
     const rapidjson::Value* materialOverrides = hasMaterialOverrides ? &materialsIt->value : nullptr;
 
+    // "$materialRemap" { "0x<old>": "0x<new>" } repoints every slot naming <old>. A base
+    // model carries each skin as an alternate material set; remapping those slots onto a
+    // base material drops the skin's material and textures without editing the rmdl.
+    std::unordered_map<PakGuid_t, PakGuid_t> materialRemap;
+    rapidjson::Value::ConstMemberIterator remapIt;
+
+    if (JSON_GetIterator(mapEntry, "$materialRemap", JSONFieldType_e::kObject, remapIt))
+    {
+        for (auto kv = remapIt->value.MemberBegin(); kv != remapIt->value.MemberEnd(); ++kv)
+        {
+            const PakGuid_t from = strtoull(kv->name.GetString(), nullptr, 0);
+            const PakGuid_t to = Pak_ParseGuid(kv->value);
+
+            if (!from || !to)
+                Error("Model \"%s\": unable to parse $materialRemap entry \"%s\".\n", assetPath, kv->name.GetString());
+
+            materialRemap[from] = to;
+        }
+    }
+
     for (int i = 0; i < studiohdr->numtextures; ++i)
     {
         mstudiotexture_v16_t* const tex = studiohdr->pTexture(i);
@@ -634,6 +654,9 @@ void Assets::AddModelAsset_v17(CPakFileBuilder* const pak, const PakGuid_t asset
                 tex->guid = guid;
             }
         }
+
+        if (const auto remapped = materialRemap.find(tex->guid); remapped != materialRemap.end())
+            tex->guid = remapped->second;
 
         const size_t pos = reinterpret_cast<char*>(tex) - dataLump.data;
         const size_t offset = pos + offsetof(mstudiotexture_v16_t, guid);

@@ -27,6 +27,7 @@ public:
 
 	inline size_t GetMandatoryStreamingAssetCount() const { return m_mandatoryStreamingDataBlocks.size(); };
 	inline size_t GetOptionalStreamingAssetCount() const { return m_optionalStreamingDataBlocks.size(); };
+	inline bool IsOptionalVirtual() const { return m_optionalVirtual; };
 
 private:
 
@@ -42,4 +43,8 @@ private:
 
 	std::vector<PakStreamSetAssetEntry_s> m_mandatoryStreamingDataBlocks;
 	std::vector<PakStreamSetAssetEntry_s> m_optionalStreamingDataBlocks;
+
+	// Optional set laid out but never written (see "streamFileOptionalVirtual").
+	bool m_optionalVirtual = false;
+	int64_t m_optionalVirtualCursor = STARPAK_DATABLOCK_ALIGNMENT;
 };
