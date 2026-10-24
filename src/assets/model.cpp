@@ -553,6 +553,19 @@ void Assets::AddModelAsset_v17(CPakFileBuilder* const pak, const PakGuid_t asset
     // Stream .vg for every model -- starpakOff=-1 fails FS_CheckAsyncRequest. Bytes are raw; do not run the GVt0 magic check.
     {
         const std::string vgFile = Utils::ChangeExtension(rmdlFilePath, ".vg");
+        {
+            BinaryIO vgCheck;
+            if (vgCheck.Open(vgFile, BinaryIO::Mode_e::Read) && vgCheck.GetSize())
+            {
+                const size_t vgSize = vgCheck.GetSize();
+                std::vector<char> vgData(IALIGN(vgSize, STARPAK_DATABLOCK_ALIGNMENT), 0);
+                vgCheck.Read(vgData.data(), vgSize);
+                // A reused entry would stream the previous build's vertices under this build's studiohdr.
+                if (!pak->StreamReuseMatches(assetGuid, vgData.data(), vgData.size()))
+                    Error("Model \"%s\": .vg changed since the last build but its starpak entry would be reused; "
+                        "delete the output starpak + starmap and rebuild.\n", assetPath);
+            }
+        }
         if (pak->TryReuseStreaming(assetGuid, &streamedVg, nullptr) && streamedVg.streamOffset >= 0)
         {
             BinaryIO vgInput;

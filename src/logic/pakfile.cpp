@@ -1073,6 +1073,39 @@ bool CPakFileBuilder::TryReuseStreaming(const PakGuid_t guid, PakStreamSetEntry_
 }
 
 //-----------------------------------------------------------------------------
+// purpose: true when the mandatory stream entry a reuse would hand out still
+//          holds these bytes (or there is no entry to reuse)
+//-----------------------------------------------------------------------------
+bool CPakFileBuilder::StreamReuseMatches(const PakGuid_t guid, const char* const data, const size_t size) const
+{
+	const auto it = m_streamReuse.find(guid);
+	if (it == m_streamReuse.end() || it->second.mandOff < 0)
+		return true;
+
+	const StreamReuse_s& e = it->second;
+	if (e.mandIdx < 0 || static_cast<size_t>(e.mandIdx) >= m_reuseMandPaths.size())
+		return false;
+
+	// The pak stores the engine-relative path; the starpak sits next to the output rpak.
+	const std::string& enginePath = m_reuseMandPaths[static_cast<size_t>(e.mandIdx)];
+	const size_t slash = enginePath.find_last_of("/\\");
+	const std::string fileName = slash == std::string::npos ? enginePath : enginePath.substr(slash + 1);
+	const size_t dirEnd = m_pakFilePath.find_last_of("/\\");
+	const std::string starpakPath = (dirEnd == std::string::npos ? std::string() : m_pakFilePath.substr(0, dirEnd + 1)) + fileName;
+
+	BinaryIO in;
+	if (!in.Open(starpakPath.c_str(), BinaryIO::Mode_e::Read))
+		return false;
+	if (static_cast<size_t>(e.mandOff) + size > static_cast<size_t>(in.GetSize()))
+		return false;
+
+	std::vector<char> old(size);
+	in.SeekGet(static_cast<std::streamoff>(e.mandOff));
+	in.Read(old.data(), size);
+	return memcmp(old.data(), data, size) == 0;
+}
+
+//-----------------------------------------------------------------------------
 // purpose: builds rpak and starpak from input map file
 //-----------------------------------------------------------------------------
 void CPakFileBuilder::BuildFromMap(const js::Document& doc)

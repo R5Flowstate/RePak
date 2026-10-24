@@ -72,6 +72,7 @@ public:
 	PakStreamSetEntry_s AddStreamingDataEntry(const int64_t size, const uint8_t* const data, const PakStreamSet_e set);
 	bool IsOptionalStreamVirtual() const;
 	bool TryReuseStreaming(const PakGuid_t guid, PakStreamSetEntry_s* const mand, PakStreamSetEntry_s* const opt);
+	bool StreamReuseMatches(const PakGuid_t guid, const char* const data, const size_t size) const;
 
 	//----------------------------------------------------------------------------
 	// inlines
